@@ -59,18 +59,13 @@ updateGalleryCount() =>
 studioToast(message, tone) =>
   let toast = document.getElementById("studioToast");
   if(!toast) return;
+
   let runtime = getFormaRuntime();
   if(runtime.toastTimer) clearTimeout(runtime.toastTimer);
+
   toast.textContent = String(message || "");
   toast.className = "studio-toast is-visible " + (tone || "");
   runtime.toastTimer = setTimeout(() => toast.classList.remove("is-visible"), 3200);
-
-  let toast = document.getElementById("studioToast");
-  if(!toast) return;
-  toast.textContent = message;
-  toast.className = "studio-toast is-visible " + (tone || "");
-  clearTimeout(window.__formaToastTimer);
-  window.__formaToastTimer = setTimeout(() => toast.classList.remove("is-visible"), 2800);
 
 updatePromptMetrics() =>
   let promptEl = document.getElementById("prompt");
@@ -186,18 +181,29 @@ async enhancePrompt() =>
   setButtonLabel(button, ".enhance-label", "Refining…");
 
   try {
-    let task = aiText({
+    let streamedText = "";
+    let result = await aiText({
       instruction: "You are an expert visual art director and text-to-image prompt engineer. Rewrite the user's idea into one polished, specific, visually coherent image prompt. Preserve the subject, intent, and important details. Improve composition, camera or rendering language, lighting, materials, environment, color relationships, and visual hierarchy only where relevant. Avoid contradictions, filler, quality-token spam, artist-name imitation, policy evasion, and instructions to render readable text unless the user requested typography. The selected direction is: " + styleName + ". Return only the final prompt, with no heading or explanation.\n\nUser idea:\n" + original,
       startWith: "",
-      hideStartWith: true
+      hideStartWith: true,
+      onChunk: (data) => {
+        if(data && typeof data.textChunk === "string") {
+          streamedText += data.textChunk;
+        } else if(data && typeof data.fullTextSoFar === "string") {
+          streamedText = data.fullTextSoFar;
+        }
+      }
     });
-
-    let result = await task.onFinishPromise;
     if(result && result.stopReason === "error") {
       throw new Error("AI Text Plugin reported a generation error.");
     }
 
-    let enhancedText = String(result && result.generatedText || "").trim();
+    let enhancedText = String(
+      (typeof result === "string" ? result : "") ||
+      (result && (result.generatedText || result.text)) ||
+      streamedText ||
+      ""
+    ).trim();
     if(!enhancedText) {
       throw new Error("AI returned an empty prompt.");
     }
@@ -357,7 +363,28 @@ async generateImages() =>
         };
         if(seedBase !== null) options.seed = seedBase + index;
 
-        let result = await image(options);
+        // The Perchance image plugin returns a task object, not the final image data.
+        let imageTask = image(options);
+        if(!imageTask || !imageTask.onFinishPromise ||
+          typeof imageTask.onFinishPromise.then !== "function") {
+          throw new Error("The image plugin returned an unexpected task object.");
+        }
+
+        let result;
+        let pluginFrame = null;
+        try {
+          // Keep the plugin iframe mounted while it runs; it may be needed for verification.
+          if(typeof imageTask.iframeHtml === "string" && imageTask.iframeHtml.trim()) {
+            let frameHost = document.createElement("div");
+            frameHost.innerHTML = imageTask.iframeHtml;
+            pluginFrame = frameHost.firstElementChild;
+            if(pluginFrame) document.body.appendChild(pluginFrame);
+          }
+          result = await imageTask.onFinishPromise;
+        } finally {
+          if(pluginFrame) pluginFrame.remove();
+        }
+
         let imageUrl = result && typeof result.dataUrl === "string" ? result.dataUrl : "";
         if(!imageUrl || !/^data:image\/[a-z0-9.+-]+;base64,/i.test(imageUrl)) {
           let pluginMessage = String(result || "Empty plugin response")
@@ -382,7 +409,9 @@ async generateImages() =>
         let download = document.createElement("a");
         download.className = "result-download";
         download.href = imageUrl;
-        download.download = "forma-image-" + Date.now() + "-" + (index + 1) + ".png";
+        let mimeType = (imageUrl.match(/^data:image\/([a-z0-9.+-]+);base64,/i) || [null, "png"])[1].toLowerCase();
+        let fileExtension = mimeType === "jpeg" ? "jpg" : mimeType;
+        download.download = "forma-image-" + Date.now() + "-" + (index + 1) + "." + fileExtension;
         download.textContent = "Download image";
         download.setAttribute("aria-label", "Download generated image " + (index + 1));
         actions.appendChild(download);
