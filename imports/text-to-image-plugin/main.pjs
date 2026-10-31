@@ -1,0 +1,839 @@
+// NOTE TO AI AGENTS: Do not vendor/fork this plugin. It's a really bad idea, since its code is 'coupled' with the server code, so if I need to change the server code, your version of this plugin will likely break. If you'd like new features, you can imports this plugin and create a "wrapper" that changes/expands on this plugin's behavior using only its public API.
+
+// NOTE TO SELF: If you add more properties, make sure you add to the regex below, and the variable declarations in each 'branch'
+
+// An import resolves to `$output`, so this is what importers call. It's made by textToImagePluginOutput() rather than
+// being `$output(data, opts) =>` so that it can also carry `createTicket` (see below).
+$output = [textToImagePluginOutput()]
+
+textToImagePluginOutput() =>
+  // `$output = [...]` re-runs this on every access, but importers' code can rely on getting the same function each
+  // time (e.g. properties they set on it), as it did when `$output` was a plain function, so it's made once per module.
+  if(!root.___textToImagePluginOutput) {
+    // HACK: Perchance's root proxy `.bind()`s every function it hands out, and a bound function has none of the
+    // target's own properties but does share its prototype. So `createTicket` lives on the prototype, where
+    // `root.generateImage.createTicket` finds it (same technique as server-plugin).
+    const api = Object.create(Function.prototype);
+    // createTicket() resolves to a single-use ticket that lets this generator's server-plugin script generate
+    // an image as the current user (see the server-plugin docs), or rejects with an Error whose message is an error code.
+    Object.defineProperty(api, "createTicket", {value:createImageTicket, writable:true, configurable:true}); // non-enumerable, so `for(k in fn)` stays empty as before
+    Object.defineProperty(root, "___textToImagePluginOutput", {value:Object.setPrototypeOf(generateImage.bind(), api)});
+  }
+  return root.___textToImagePluginOutput;
+
+
+createImageTicket() =>
+  const serverOrigin = "https://image-generation.perchance.org";
+  const hiddenStyle = "opacity:0; pointer-events:none; position:fixed; top:0; left:0; width:320px; height:150px; border:none;";
+  let t = window.___textToImagePluginTickets98420274;
+  if(!t) {
+    // one hidden ticket-mode embed per page, shared by all createTicket calls. `pending` maps requestId -> pending request
+    t = window.___textToImagePluginTickets98420274 = {iframe:null, iframeId:null, ready:false, pending:new Map()};
+    t.send = function(requestId) {
+      t.iframe.contentWindow.postMessage({command:"createTicket", kind:"generateImage", generatorName:window.generatorName, requestId}, serverOrigin);
+    };
+    window.addEventListener("message", function(event) {
+      if(!t.iframe || event.source !== t.iframe.contentWindow || event.origin !== serverOrigin || event.data.id !== t.iframeId) return;
+      if(event.data.type === "readyForData") {
+        // also sent again when the embed reloads itself, which forgets requests it was working on, so (re)send all pending ones
+        t.ready = true;
+        for(let requestId of t.pending.keys()) t.send(requestId);
+      }
+      if(event.data.type === "ticketNeedsInteraction") {
+        t.iframe.style.cssText = "position:fixed; top:0.5rem; right:0.5rem; width:320px; height:150px; max-width:calc(100vw - 1rem); border:none; border-radius:3px; box-shadow:0px 2px 4px 0px #00000066; z-index:10000; color-scheme:light dark; background:white; background:light-dark(white, #222);";
+      }
+      if(event.data.type === "ticketResult") {
+        t.pending.get(event.data.requestId)?.settle(event.data);
+      }
+    });
+  }
+  if(!t.iframe || !t.iframe.isConnected) { // first use, or generator code removed it (e.g. by rewriting document.body)
+    t.iframeId = "textToImagePluginTicketFrame"+Math.random().toString().replace(".", "");
+    t.ready = false;
+    t.iframe = document.createElement("iframe");
+    t.iframe.src = `${serverOrigin}/embed#${encodeURIComponent(JSON.stringify({mode:"ticket", iframeId:t.iframeId}))}`;
+    t.iframe.style.cssText = hiddenStyle;
+    document.body.append(t.iframe);
+  }
+  let requestId = "imageTicket"+Math.random().toString().replace(".", "");
+  return new Promise((resolve, reject) => {
+    function settle(data) {
+      t.pending.delete(requestId);
+      clearTimeout(timeout);
+      if(t.pending.size === 0) t.iframe.style.cssText = hiddenStyle;
+      if(typeof data.ticket === "string") resolve(data.ticket);
+      else reject(new Error(data.error || "invalid_response: the image generation server sent no ticket"));
+    }
+    let timeout = setTimeout(() => settle({error:"timeout: the image generation server didn't create a ticket within 3 minutes"}), 1000*60*3);
+    t.pending.set(requestId, {settle});
+    if(t.ready) t.send(requestId); // otherwise it's sent on readyForData
+  });
+
+
+generateImage(data, opts) =>
+  if(data === undefined) return "(Error: you've input an empty value/variable into the text-to-image-plugin)";
+
+  // Allow for `await generateImage("a cute cat", {resolution:"512x768", removeBackground:true})` type usage
+  if(opts && typeof opts === "object") {
+    opts.prompt = data;
+    data = opts;
+  }
+  
+  // if(options === undefined) options = {};
+  
+  let serverOrigin = "https://image-generation.perchance.org";
+  
+  let evaluatedInputs;
+  
+  // This is used for the heart-button gallery. It's a bit hacky, but most often devs will want the "open gallery" button to show a gallery with e.g. the same moderation options as the gallery that they've displayed on the page, if any.
+  window.lastUsedTextToImagePluginGalleryIframeUrl = null;
+  
+  let shouldRemoveIframeOnFinish = false; // for the case where the iframe was added automatically - i.e. when called like:  `let result = await image({prompt:"a cute mouse"})`
+
+  let galleryOptionsHash = null; // only used if this is a gallery call
+
+  ////////////////////////////////////////////////
+  //       set up handler for gallery           //
+  ////////////////////////////////////////////////
+  let pluginData;
+  if(!window.___textToImagePluginData98420274) {
+    window.addEventListener("message", function(e) {
+      let origin = e.origin || e.originalEvent.origin;
+      if(origin !== serverOrigin) {
+        return;
+      }
+      if(e.data.openGallerySignal) {
+        let ctn = document.createElement("div");
+        let subChannelName = e.data.subChannelName;
+        let url;
+        if(window.lastUsedTextToImagePluginGalleryIframeUrl) {
+          url = new URL(window.lastUsedTextToImagePluginGalleryIframeUrl);
+          url.searchParams.set("subChannelName", subChannelName);
+          url = url.href;
+        } else {
+          url = `${serverOrigin}/gallery?channel=${window.generatorName}&subChannel=${encodeURIComponent(subChannelName)}&sort=trending&timeRange=1-month&contentFilter=g`;
+        }
+        let backgroundColor = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? "#242424" : "white";
+        ctn.innerHTML = `<div onclick="this.remove()" style="backdrop-filter:brightness(0.3);position:fixed;top:0;left:0;right:0;bottom:0;z-index:999;"><div style="position:fixed;top:5vh;bottom:5vh;left:5vh;right:5vh;background:${backgroundColor};border-radius:3px;"><iframe src="${url}" style="border:0;width:100%;height:100%;"></iframe></div></div>`;
+        document.body.appendChild(ctn.firstElementChild);
+      }
+      if(e.data.savedImageToGallerySignal) {
+        document.querySelectorAll(".text-to-image-plugin-gallery").forEach(el => {
+          let targetOrigin = serverOrigin;
+          try { if(el.contentWindow) el.contentWindow.postMessage({doRefreshIfSortingByRecent:true}, targetOrigin); } catch(e) {} // embed may have been detached (2026-08-24: null contentWindow threw the generic error toast)
+          
+          // the code below is commented out because it doesn't work for the case where the user has switched the sort to recent (since, counter-intuitively, iframe's window.location can change, while iframe.src stays as the original value - I'm assuming this is due to cross-origin security stuff)
+          // if(el.src.includes("sort=recent")) {
+          //   // refresh galleries that are sorted by recent if the user makes a submission
+          //   let url = new URL(el.src);
+          //   url.searchParams.set("cacheBust", Math.random().toString());
+          //   el.src = ""; // we do this instead of el.src=el.src because that doesn't work if the URL has a hash in it, and I might need to add data in the hash later
+          //   setTimeout(() =>el.src=url.href, 700); // we need to wait a bit for the iframe to actually initiate a reload/refresh before setting the src again
+          // }
+        });
+      }
+      if(e.data.documentHeightChanged) {
+        document.querySelectorAll(".text-to-image-plugin-gallery").forEach(el => {
+          if(el.dataset.adaptiveHeight === "yes") {
+            el.style.height = (e.data.newHeight+1)+"px";
+            console.debug("Updated gallery height", e.data.newHeight);
+          }
+        });
+      }
+      if(e.data.customButtonClickEvent) {
+        if(e.data.isButton2) {
+          let handlerFn = pluginData.galleryCustomButton2ClickHandlers[e.data.galleryInstanceId];
+          if(handlerFn) handlerFn(e.data.onClickHandlerData);
+        } else {
+          let handlerFn = pluginData.galleryCustomButtonClickHandlers[e.data.galleryInstanceId];
+          if(handlerFn) handlerFn(e.data.onClickHandlerData);
+        }
+      }
+    });
+    window.___textToImagePluginData98420274 = {
+      galleryCustomButtonClickHandlers: {},
+      galleryCustomButton2ClickHandlers: {},
+    };
+  }
+  pluginData = window.___textToImagePluginData98420274;
+  
+  if(data.gallery) {
+    let sort = data.sort ? data.sort.evaluateItem : "recent";
+    if(sort === "best") sort = "top"; // alias
+    
+    let contentFilter = data.contentFilter ? data.contentFilter.evaluateItem.toLowerCase() : "g";
+    if(contentFilter === "pg-13") contentFilter = "pg13";
+    if(contentFilter !== "pg13" && contentFilter !== "g") contentFilter = "g";
+    
+    let bannedUsers = data.bannedUsers ? data.bannedUsers.selectAll.map(item => item.toString()) : [];
+    
+    // let bannedPromptPhrases = data.bannedPromptPhrases ? data.bannedPromptPhrases.selectAll.map(item => item.getRawListText.replace("/\\^", "/^")) : [];
+    let bannedPromptPhrases = [];
+    if(data.bannedPromptPhrases) {
+      if(Array.isArray(data.bannedPromptPhrases)) {
+        bannedPromptPhrases = data.bannedPromptPhrases.map(item => item.toString());
+      } else {
+        bannedPromptPhrases = data.bannedPromptPhrases.selectAll.map(item => item.getRawListText.replace("/\\^", "/^"));
+      }
+    }
+
+    // let bannedNegativePromptPhrases = data.bannedNegativePromptPhrases ? data.bannedNegativePromptPhrases.selectAll.map(item => item.getRawListText.replace("/\\^", "/^")) : [];
+    let bannedNegativePromptPhrases = [];
+    if(data.bannedNegativePromptPhrases) {
+      if(Array.isArray(data.bannedNegativePromptPhrases)) {
+        bannedNegativePromptPhrases = data.bannedNegativePromptPhrases.map(item => item.toString());
+      } else {
+        bannedNegativePromptPhrases = data.bannedNegativePromptPhrases.selectAll.map(item => item.getRawListText.replace("/\\^", "/^"));
+      }
+    }
+
+    let defaultSubChannelNames = [];
+    if(data.defaultGalleryNames) {
+      if(typeof data.defaultGalleryNames === "string") {
+        defaultSubChannelNames = data.defaultGalleryNames.split(",").map(name => name.trim()).filter(name => name && /^[a-z0-9\-]+$/.test(name));
+      } else {
+        defaultSubChannelNames = data.defaultGalleryNames.selectAll.map(item => item+"");
+      }
+    }
+    
+    let timeRange = data.timeRange ? data.timeRange.evaluateItem : (sort === "recent" ? "all-time" : "1-month");
+    let hideIfScoreIsBelow = data.hideIfScoreIsBelow !== undefined ? Number(data.hideIfScoreIsBelow.evaluateItem) : -1000000000;
+    if(isNaN(hideIfScoreIsBelow)) hideIfScoreIsBelow = -1000000000;
+    
+    let galleryOptions = {sort, timeRange, hideIfScoreIsBelow, contentFilter, subChannel:"public"}; // this is also used for checking if gallery options have been udpated (see below)
+    if(data.forceColorScheme) galleryOptions.forceColorScheme = data.forceColorScheme;
+
+    const galleryInstanceId = "galleryInstanceId"+(Math.random().toString()+Math.random().toString()).replaceAll(".", "");
+    
+    let customButtonEmoji = null;
+    let shouldShowCustomButton = false;
+    let customButtonOptions = data.customButton || data.customButton1;
+    if(customButtonOptions) {
+      shouldShowCustomButton = true;
+      if(customButtonOptions.onClick) pluginData.galleryCustomButtonClickHandlers[galleryInstanceId] = customButtonOptions.onClick;
+      if(customButtonOptions.emoji) customButtonEmoji = customButtonOptions.emoji.evaluateItem;
+    }
+
+    let customButton2Emoji = null;
+    let shouldShowCustomButton2 = false;
+    if(data.customButton2) {
+      shouldShowCustomButton2 = true;
+      if(data.customButton2.onClick) pluginData.galleryCustomButton2ClickHandlers[galleryInstanceId] = data.customButton2.onClick;
+      if(data.customButton2.emoji) customButton2Emoji = data.customButton2.emoji.evaluateItem;
+    }
+    
+    let hashData = {galleryInstanceId, shouldShowCustomButton, customButtonEmoji, shouldShowCustomButton2, customButton2Emoji, bannedUsers, bannedPromptPhrases, bannedNegativePromptPhrases, injectedStyles:{}, defaultSubChannelNames};
+    if(data.style) {
+      let style = data.style.evaluateItem.trim();
+      if(style.includes("background:")) {
+        hashData.injectedStyles.background = (style.match(/(?:^|;) *background:(.+?)(?:;|$)/) || [])[1];
+      } else if(style.includes("background-color:")) {
+        hashData.injectedStyles.background = (style.match(/(?:^|;) *background-color:(.+?)(?:;|$)/) || [])[1];
+      }
+    }
+    
+    let otherUrlParams = {channel:window.generatorName};
+    let iframeUrl = new URL(`${serverOrigin}/gallery`);
+    Object.entries(galleryOptions).forEach(([key, value]) => iframeUrl.searchParams.set(key, value));
+    Object.entries(otherUrlParams).forEach(([key, value]) => iframeUrl.searchParams.set(key, value));
+    
+    
+    function makeGalleryIframeHtml() {
+      let url = iframeUrl.href + `#data=${encodeURIComponent(JSON.stringify(hashData))}`;
+      window.lastUsedTextToImagePluginGalleryIframeUrl = url;
+      return `<iframe data-gallery-options="${encodeURIComponent(JSON.stringify(galleryOptions))}" data-adaptive-height="${data.adaptiveHeight ? "yes" : "no"}" style="width:100%; height:70vh; border:none; ${data.style || ""}" class="text-to-image-plugin-gallery" src="${url}" allow="clipboard-write"></iframe>`;
+    }
+    
+    if(!document.querySelector(".text-to-image-plugin-gallery")) {
+      setTimeout(() => {
+        let marker = document.querySelector("#temporaryMarkerElForTextToImageGallery84738932");
+        if(marker) marker.outerHTML = makeGalleryIframeHtml()
+      }, 50);
+      return `<span id="temporaryMarkerElForTextToImageGallery84738932"></span>`;
+    } else {
+      // update any gallery parameters if they have been changed:
+      let galleryIframe = document.querySelector(".text-to-image-plugin-gallery");
+      let newGalleryOptionsText = encodeURIComponent(JSON.stringify(galleryOptions));
+      if(galleryIframe.dataset.galleryOptions !== newGalleryOptionsText) {
+        galleryIframe.outerHTML = makeGalleryIframeHtml();
+      }
+      return "";
+    }
+  }
+  
+  
+  
+  
+  
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //              parse and evaluate prompt data/options from input                    //
+  ///////////////////////////////////////////////////////////////////////////////////////
+  const defaultGuidanceScale = 7;
+  
+  let d = {}; 
+  // let dataInputWasNotAnOptionsObject = false;
+  
+  if(data.prompt === undefined) {
+    d.prompt = data.evaluateItem.toString(); // they passed in some text directly like [image("a carrot")]
+  } else {
+    d.prompt = data.prompt.evaluateItem.toString();
+  }
+  // Apply some covenience fixes to the prompt, even though the plugin user should ideally fix this on their end:
+  d.prompt = d.prompt.replace(/<span [^>]+______tippy-tooltip-[^>]+>(.+?)<\/span>/, "$1");
+  
+  // parse values from prompts like: `this is the prompt text (size:::400) (resolution:::512x768) (guidanceScale:::10)`
+  if(d.prompt.includes(":::")) {
+    let matches = [...d.prompt.matchAll(/\((seed|size|style|resolution|width|height|guidanceScale|saveTitle|saveDescription)\:\:\:/g)];
+    // console.debug("matches:", matches);
+    const numericProps = ["seed", "width", "height", "guidanceScale", "width", "height", "size"];
+    for(let match of matches) {
+      let re = new RegExp(`\\(${match[1]}\\:\\:\\:(.+?)\\).*?(?:\\:\\:\\:|$)`, "m");
+      let value = (d.prompt.match(re) || [])[1]
+      let key = match[1];
+      if(value !== undefined) {
+        d[key] = numericProps.includes(key) ? Number(value) : value;
+        d.prompt = d.prompt.replace(`(${key}:::${value})`, "");
+      }
+    }
+    d.prompt = d.prompt.trim();
+  }
+  if(!window.___t2i__parseNegativePrompt) {
+    window.___t2i__parseNegativePrompt = function(str) {
+      const prefix = '(negativePrompt:::';
+      const start = str.indexOf(prefix);
+      if (start === -1) return null;
+      let depth = 0;
+      let result = '';
+      for(let i = start + prefix.length; i < str.length; i++) {
+        if(str[i] === '(') {
+          depth++;
+        } else if (str[i] === ')') {
+          if(depth === 0) {
+            break;
+          }
+          depth--;
+        }
+        result += str[i];
+      }
+      return result;
+    };
+  }
+  if(d.prompt.includes("(negativePrompt:::")) {
+    let result = window.___t2i__parseNegativePrompt(d.prompt);
+    if(result) {
+      d.negativePrompt = result;
+      d.prompt = d.prompt.replace(`(negativePrompt:::${d.negativePrompt})`, "");
+      d.prompt = d.prompt.replace(`(negativePrompt:::${d.negativePrompt}`, ""); // since if final bracket is missing, then all following text is considered the negative prompt
+    }
+    d.prompt = d.prompt.trim();
+  }
+  
+  if(!data.prompt) { // they passed in some text directly like [image("a carrot")], so add some defaults/fallbacks.
+    if(d.seed === undefined) d.seed = -1;
+    if(d.width === undefined) d.width = 300;
+    if(d.height === undefined) d.height = 300;
+    if(d.resolution === undefined) d.resolution = "512x512";   
+    if(d.guidanceScale === undefined) d.guidanceScale = defaultGuidanceScale;
+    if(d.negativePrompt === undefined) d.negativePrompt = "";
+    if(d.style === undefined) d.style = "";
+  }
+  
+  
+  // EDIT: Not going ahead with this for now in favor of a setting a global variable which contains data on the last-used prompt.
+  // // NOTE: Originally `data` was the only param and it could be the prompt, or a promptOptions object/list.
+  // // But I realised that it's not very ergonomic (see e.g. reddit.com/r/perchance/comments/yta11r), so now, in a backwards-compatible way,
+  // // I'm allowing the user to pass the options as the second parameter instead. This just means that if data is a prompt (rather than a
+  // // promptOptions object), then we use the `options` parameter (which defaults to an empty object) for the generation options:
+  // if(dataInputWasNotAnOptionsObject) {
+  //   data = options; // this
+  // }
+  
+  if(!d.seed) d.seed = data.seed ? data.seed.evaluateItem : -1;
+  if(!d.resolution) d.resolution = data.resolution ? data.resolution.evaluateItem : "512x512";
+  if(!d.guidanceScale) d.guidanceScale = data.guidanceScale ? data.guidanceScale.evaluateItem : defaultGuidanceScale;
+  if(!d.negativePrompt) d.negativePrompt = data.negativePrompt ? data.negativePrompt.evaluateItem : "";
+  if(!d.width) d.width = data.width ? data.width.evaluateItem : undefined; 
+  if(!d.height) d.height = data.height ? data.height.evaluateItem : undefined; 
+  if(!d.style) d.style = data.style ? data.style.evaluateItem : "";
+  if(!d.saveTitle) d.saveTitle = data.saveTitle ? data.saveTitle.evaluateItem : "";
+  if(!d.saveDescription) d.saveDescription = data.saveDescription ? data.saveDescription.evaluateItem : "";
+  
+  
+  // NOTE: This stuff is not longer needed because we do the parsing above regardless of whether they passed a plain string in, or a promptOptions object.
+  // // if seed is specified within the prompt with the (key:::value) format - i.e. they used promptOptions input but specified the seed within promptOptions.prompt, and so long as promptOptions.seed is not specified, then we set the seed to the one specified in the prompt:
+  // if(data.seed === undefined && d.prompt.includes("(seed:::")) {
+  //   let seed = null;
+  //   d.prompt = d.prompt.replace(/\(seed:::([0-9]+)\)/g, (m, p1) => { seed=Number(p1); return ""; });
+  //   if(seed) {
+  //     d.seed = seed;
+  //   }
+  // }
+  // // same for guidanceScale:
+  // if(data.guidanceScale === undefined && d.prompt.includes("(guidanceScale:::")) {
+  //   let guidanceScale = null;
+  //   d.prompt = d.prompt.replace(/\(guidanceScale:::([0-9]+)\)/g, (m, p1) => { guidanceScale=Number(p1); return ""; });
+  //   if(guidanceScale) {
+  //     d.guidanceScale = guidanceScale;
+  //   }
+  // }
+  // // same for width:
+  // if(data.guidanceScale === undefined && d.prompt.includes("(width:::")) {
+  //   let width = null;
+  //   d.prompt = d.prompt.replace(/\(width:::([0-9]+)\)/g, (m, p1) => { width=Number(p1); return ""; });
+  //   if(width) {
+  //     d.width = width;
+  //   }
+  // }
+  // // same for height:
+  // if(data.guidanceScale === undefined && d.prompt.includes("(height:::")) {
+  //   let height = null;
+  //   d.prompt = d.prompt.replace(/\(height:::([0-9]+)\)/g, (m, p1) => { height=Number(p1); return ""; });
+  //   if(height) {
+  //     d.height = height;
+  //   }
+  // }
+  // // same for size:
+  // if(data.guidanceScale === undefined && d.prompt.includes("(size:::")) {
+  //   let size = null;
+  //   d.prompt = d.prompt.replace(/\(size:::([0-9]+)\)/g, (m, p1) => { size=Number(p1); return ""; });
+  //   if(size) {
+  //     d.size = size;
+  //   }
+  // }
+  
+  
+  ////////////////////////////////////////////////
+  //           sanity checks on inputs          //
+  ////////////////////////////////////////////////
+  
+  if(d.size && d.resolution && d.resolution.split("x")[0] !== d.resolution.split("x")[1]) {
+    return `(text-to-image-plugin: <b>size</b> is only a valid parameter with square resolutions. use <b>width</b> and <b>height</b> instead)`;
+  }
+
+  if(d.guidanceScale < 1 || Math.round(d.guidanceScale) !== d.guidanceScale) {
+    return `(text-to-image-plugin: <b>guidanceScale</b> should be a whole number between 1 and 30, inclusive)`;
+  }
+  
+  if(!["512x512", "512x768", "768x512", "768x768"].includes(d.resolution)) {
+    return "(text-to-image-plugin: Currently, the only valid resolutions are 512x512, 768x768, 512x768 and 768x512)";
+  }
+  
+  
+  
+  ////////////////////////////////////////////////
+  //        un-shortcut size/width/height       //
+  ////////////////////////////////////////////////
+  let resW = Number(d.resolution.split("x")[0]);
+  let resH = Number(d.resolution.split("x")[1]);
+  let widthHeightCss = "";
+  if(d.size) {
+    let size = d.size.evaluateItem;
+    if(typeof size === "number") size += "px";
+    widthHeightCss = `width:${size}`;
+  } else {
+    if(d.width && !d.height) {
+      d.width = d.width.evaluateItem;
+      if(typeof d.width === "number") d.width += "px";
+      widthHeightCss = `width:${d.width}`;
+      // d.height = d.width * (resH/resW);
+    } else if(!d.width && d.height) {
+      d.height = d.height.evaluateItem;
+      if(typeof d.height === "number") d.height += "px";
+      widthHeightCss = `height:${d.height}`;
+      // d.width = d.height * (resW/resH);
+    } else if(!d.width && !d.height) {
+      // make the smallest side 300px by default:
+      let defaultSize = 300;
+      if(d.resolution === "768x768") defaultSize = 450;
+      if(resW > resH) {
+        d.height = defaultSize;
+        widthHeightCss = `height:${d.height}px`; // can't add max-height:100% here - it breaks stuff, like ai-character-chat
+        // d.width = d.height * (resW/resH);
+      } else {
+        d.width = defaultSize;
+        widthHeightCss = `width:${d.width}px`; // can't add max-width:100% here - it breaks stuff, like ai-character-chat
+        // d.height = d.width * (resH/resW);
+      }
+    } else if(d.width && d.height) {
+      if(typeof d.width === "number") d.width += "px";
+      if(typeof d.height === "number") d.height += "px";
+      widthHeightCss = `width:${d.width}; height:${d.height}`;
+    }
+  }
+  
+  if(d.style && /[;\s]?(width|height):/.test(d.style)) widthHeightCss = "";
+  
+  if(!CSS.supports("aspect-ratio", "1/2")) { // hackily help old browsers that don't support aspect-ratio if possible
+    let width = (widthHeightCss.match(/width:([^;]+)px;?/) || [])[1];
+    if(width && !widthHeightCss.includes("height") && !isNaN(Number(width))) {
+      widthHeightCss += `; height:${Number(width) * (resH/resW)}px;`;
+    }
+    let height = (widthHeightCss.match(/height:([^;]+)px;?/) || [])[1];
+    if(height && !widthHeightCss.includes("width") && !isNaN(Number(height))) {
+      widthHeightCss += `; width:${Number(height) * (resW/resH)}px;`;
+    }
+  }
+  
+  let requestId = Math.random().toString();
+  let privateIframeId = "id" + Math.random().toString().replace(".", "");
+  
+  // let iframePromiseResolver;
+  // let iframePromise = new Promise(r => iframePromiseResolver=r);
+  // let canvasPromiseResolver;
+  // let canvasPromise = new Promise(r => canvasPromiseResolver=r);
+  // let dataUrlPromiseResolver;
+  // let dataUrlPromise = new Promise(r => dataUrlPromiseResolver=r);
+  let onFinishPromiseResolver;
+  let onFinishPromise = new Promise(r => onFinishPromiseResolver=r);
+  
+
+  async function messageHandler(event) {
+    if(event.data.type === 'finished' && event.data.id === privateIframeId) {
+      // TODO: Should remove this message handler when it's finished, but 
+      
+      function drawDataURLToCanvas(dataURL) {
+        return new Promise((resolve, reject) => {
+          const canvas = document.createElement("canvas");
+          const ctx = canvas.getContext("2d");
+          const img = new Image();
+          img.onload = () => {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            ctx.drawImage(img, 0, 0);
+            resolve(canvas);
+          };
+          img.src = dataURL;
+        });
+      }
+      
+      async function removeBackground(imageUrl) { // can be data url or normal URL
+        if (!removeBackground.transformers) {
+          const transformers = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3');
+          transformers.env.allowLocalModels = false;
+          transformers.env.backends.onnx.wasm.proxy = true;
+          removeBackground.transformers = transformers;
+        }
+        
+        const { AutoModel, AutoProcessor, RawImage } = removeBackground.transformers;
+        if (!removeBackground.model || !removeBackground.processor) {
+          removeBackground.model = await AutoModel.from_pretrained('briaai/RMBG-1.4', {
+            config: { model_type: 'custom' },
+          });
+          
+          removeBackground.processor = await AutoProcessor.from_pretrained('briaai/RMBG-1.4', {
+            config: {
+              do_normalize: true,
+              do_pad: false,
+              do_rescale: true,
+              do_resize: true,
+              image_mean: [0.5, 0.5, 0.5],
+              feature_extractor_type: "ImageFeatureExtractor",
+              image_std: [1, 1, 1],
+              resample: 2,
+              rescale_factor: 0.00392156862745098,
+              size: { width: 1024, height: 1024 },
+            }
+          });
+        }
+        
+        const image = await RawImage.fromURL(imageUrl);
+        const { pixel_values } = await removeBackground.processor(image);
+        const { output } = await removeBackground.model({ input: pixel_values });
+        const mask = await RawImage.fromTensor(output[0].mul(255).to('uint8')).resize(image.width, image.height);
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const ctx = canvas.getContext('2d');
+        
+        // Draw original image output to canvas
+        ctx.drawImage(image.toCanvas(), 0, 0);
+        
+        // Update alpha channel
+        const pixelData = ctx.getImageData(0, 0, image.width, image.height);
+        for (let i = 0; i < mask.data.length; ++i) {
+          pixelData.data[4 * i + 3] = mask.data[i];
+        }
+        ctx.putImageData(pixelData, 0, 0);
+        
+        return canvas.toDataURL('image/png');
+      }
+
+      
+      let dataUrl = event.data.dataUrl;
+      if(data.removeBackground) {
+        let pngDataUrlWithBgRemoved = await removeBackground(dataUrl).catch(console.error);
+        if(pngDataUrlWithBgRemoved) dataUrl = pngDataUrlWithBgRemoved;
+      }
+
+      let canvas = await drawDataURLToCanvas(dataUrl);
+      let iframe = document.querySelector(`iframe.${privateIframeId}`); // NOTE: may be null if it has been removed! (todo: keep original reference around instead of querySelector?)
+
+      if(!iframe) window.removeEventListener('message', messageHandler); // iframes not in DOM cannot send any more messages
+      
+      let outputData = new String(dataUrl);
+      outputData.canvas = canvas;
+      outputData.iframe = iframe;
+      outputData.dataUrl = dataUrl;
+      outputData.inputs = evaluatedInputs;
+      outputData.inputs.seed = event.data.seedUsed;
+      
+      if(iframe) iframe.textToImagePluginOutput = outputData;
+      
+      if(shouldRemoveIframeOnFinish) {
+        delete outputData.iframe;
+        // null guard (2026-08-24 bug report): `iframe` comes from querySelector and can be null
+        // (see the note above) — an unguarded .remove() threw BEFORE onFinishPromiseResolver,
+        // so an awaited generateImage() hung forever on top of the uncaught TypeError
+        if(iframe) iframe.remove();
+        window.removeEventListener('message', messageHandler);
+      }
+      
+      if(data.onFinish) {
+        data.onFinish(outputData);
+      }
+      onFinishPromiseResolver(outputData);
+    }
+  }
+  window.addEventListener('message', messageHandler);
+  
+  let iframeExistentPollInterval = setInterval(() => {
+    if(!document.querySelector(`iframe.${privateIframeId}`)) {
+      clearInterval(iframeExistentPollInterval);
+      window.removeEventListener('message', messageHandler);
+    }
+  }, 1000*60); // not important to remove listener immediately, so long interval is fine
+  
+  function blobToDataUrl(blob) {
+    return new Promise(r => {
+      const reader = new FileReader();
+      reader.onload = () => r(reader.result);
+      reader.readAsDataURL(blob);
+    });
+  }
+  
+  // NOTE: referenceImage is deliberately DISABLED server-side and currently has NO EFFECT
+  // on the generated output — the parameter is parsed and sent but ignored for general
+  // traffic (2026-08-25, per the platform owner). Don't build img2img flows on it.
+  let referenceImage = null;
+  if(data.referenceImage) {
+    referenceImage = {};
+    // url can actually be a blob or a blob URL, in which case we postMessage the data to the iframe
+    let isBlobby = data.referenceImage.url instanceof Blob; // blobby means Blob or blob URL string
+    let url, blobby;
+    
+    if(isBlobby) blobby = data.referenceImage.url;
+    else url = data.referenceImage.url.evaluateItem !== undefined ? data.referenceImage.url.evaluateItem : data.referenceImage.url; // fall back to the raw value for plain-JS (unwrapped) string urls
+    
+    // typeof guard (2026-08-24 bug report): when a raw Blob is passed, `url` is undefined
+    // here and url.startsWith threw — Blob referenceImages crashed while data:/https ones worked
+    if(!isBlobby && typeof url === "string" && url.startsWith("blob:")) {
+      isBlobby = true;
+      blobby = url;
+      url = null;
+    }
+    
+    if(isBlobby) {
+      referenceImage.url = "<data-via-postmessage>";
+      (async () => {
+        let blob;
+        if(typeof blobby === "string" && blobby.startsWith("blob:")) {
+          blob = await fetch(blobby).then(r => r.blob());
+        } else {
+          blob = blobby;
+        }
+        let dataUrl = await blobToDataUrl(blob);
+        window.addEventListener('message', function(event) {
+          if(event.data.type === 'readyForData' && event.data.id === privateIframeId) {
+            try {
+              let refIframe = document.querySelector(`iframe.${privateIframeId}`);
+              if(refIframe && refIframe.contentWindow) refIframe.contentWindow.postMessage({id:privateIframeId, referenceImageDataUrl:dataUrl}, serverOrigin);
+            } catch(e) {} // iframe removed/detached before the embed asked for data (2026-08-24: null contentWindow threw the generic error toast)
+          }
+        });
+      })();
+    } else {
+      referenceImage.url = url;
+    }
+    referenceImage.blur = data.referenceImage.blur.evaluateItem;
+    // if(referenceImage.url && !referenceImage.url.startsWith("https://user-uploads.perchance.") && !referenceImage.url.startsWith("data:")) return `referenceImage.url must either be a 'data URL' (starting with 'data:') or a https://user-uploads.perchance.org URL - i.e. an image that has been uploaded to https://perchance.org/upload - the URL you've used is: '${referenceImage.url && typeof referenceImage.url === "string" && referenceImage.url.length > 30 ? referenceImage.url.slice(0, 30)+"..." : referenceImage.url}'.`;
+    if(referenceImage.blur > 1 || referenceImage.blur < 0) return `referenceImage.blur must be between 0 and 1, but is instead '${referenceImage.blur > 1}'.`
+  }
+  
+  window.addEventListener('message', function(event) {
+    if(event.data.type === 'readyForData' && event.data.id === privateIframeId) {
+      let iframe = document.querySelector(`iframe.${privateIframeId}`);
+      try { if(iframe && iframe.contentWindow) iframe.contentWindow.postMessage({type:"originNotify", frameId:privateIframeId}, serverOrigin); } catch(e) {} // iframe removed/detached mid-generation (2026-08-24)
+    }
+  });
+  
+  let urlHashData = {
+    saveChannel: window.generatorName,
+    saveTitle: d.saveTitle,
+    saveDescription: d.saveDescription,
+    prompt: d.prompt,
+    seed: d.seed,
+    resolution: d.resolution,
+    guidanceScale: d.guidanceScale,
+    defaultGuidanceScale,
+    negativePrompt: d.negativePrompt,
+    requestId: requestId,
+    forceColorScheme: data.forceColorScheme,
+    verifyOnly: data.verifyOnly,
+    iframeId: privateIframeId,
+    hideGalleryButtons: data.hideGalleryButtons,
+    removeBackground: data.removeBackground,
+    referenceImage,
+  };
+  
+  // clone input for onFinish data:
+  evaluatedInputs = JSON.parse(JSON.stringify(d));
+  
+  let iframeId = data.id ? data.id.evaluateItem : "";
+  if(iframeId) {
+    setTimeout(() => {
+      document.querySelector("#"+iframeId).reload = function() {
+        let src = this.src;
+        this.src = "";
+        setTimeout(() =>this.src=src, 700);
+      };
+    }, 500);
+  }
+  
+  window.lastTextToImagePrompt = d.prompt;
+  if(data.prompt) { // <-- i.e. if they passed a promptOptions object
+    data.lastUsedPrompt = d.prompt;
+    data.lastUsedNegativePrompt = d.negativePrompt;
+  }
+  
+  // VERY lazily load the iframe (only when screen actually intersects) because some people add a lot of images in subsections and in several different tabs of tabs-plugin, etc.
+  // This ensures they don't spam the server, and the visible ones get generated first.
+  setTimeout(async () => {
+    // the dev may have generated the HTML, but not actually added it to the DOM for a while, so we wait up to 5 mins for it
+    let waitedSeconds = 0;
+    while([...document.querySelectorAll(".text-to-image-plugin-image-iframe")].filter(el => el.dataset.alreadyAddedIntersectionObserver === "no").length === 0) {
+      await new Promise(r => setTimeout(r, 500));
+      waitedSeconds += 0.5;
+      if(waitedSeconds > 60*5) return;
+    }
+    for(let el of [...document.querySelectorAll(".text-to-image-plugin-image-iframe")]) {
+      if(el.dataset.alreadyAddedIntersectionObserver === "yes") continue;
+      el.dataset.alreadyAddedIntersectionObserver = "yes";
+      
+      let observer1, observer2;
+      
+      let rootMarginSize = Math.min(1000, (window.innerHeight*2));
+      if(window.innerWidth < 600) {
+        rootMarginSize = Math.min(1500, (window.innerHeight*3)); // larger on mobile because e.g. images that might otherwise be displayed side by side are instead displayed vertically
+      }
+      
+      function handler(entries) {
+        if(entries[0].isIntersecting) {
+          // console.debug("t2i iframe: Visible");
+          if(!el.src) {
+            el.removeAttribute("srcdoc");
+            el.src = el.dataset.src;
+            observer1.disconnect();
+            observer2.disconnect(); 
+          }
+        } else {
+          // console.debug("t2i iframe: NOT Visible");
+        }
+      }
+      observer1 = new IntersectionObserver(handler, {
+        root: document.documentElement, // otherwise I think it uses the top-level viewport? either way, it doesn't seem to work without specifying this.
+        rootMargin: rootMarginSize+"px", // it's important that this is quite big - so that e.g. mobile users don't have to scroll down to trigger stuff. we basically want to trigger ~all visible elements anyway - just not stuff hidden within e.g. tabs plugin or whatever.
+      });
+      observer1.observe(el);
+      // for some reason, in some situations, the above intersection observer was reporting the `root` and `el` bounding rects as 0x0x0x0. Adding a second observer using the viewport root fixes this:
+      observer2 = new IntersectionObserver(handler, {
+        rootMargin: rootMarginSize+"px",
+      });
+      observer2.observe(el);
+      // RECT-POLL FALLBACK (2026-08-24 bug report: IntersectionObserver can stop firing
+      // entirely in a page whose renderer's rendering pipeline is suspended/wedged — JS
+      // still runs, but IO callbacks ride rendering steps, so lazy tiles stayed permanently
+      // blank and reloads didn't help). getBoundingClientRect works without rendering
+      // steps: poll it and load the tile once it's within the same margin the observers
+      // use. Stops with the observers (el.src set) or when the tile leaves the DOM.
+      let rectPoll = setInterval(() => {
+        try {
+          if(el.src || !document.documentElement.contains(el)) { clearInterval(rectPoll); return; }
+          let r = el.getBoundingClientRect();
+          let m = rootMarginSize;
+          if(r.bottom >= -m && r.top <= (window.innerHeight || 0) + m && r.right >= -m && r.left <= (window.innerWidth || 0) + m) {
+            handler([{isIntersecting: true}]);
+            clearInterval(rectPoll);
+          }
+        } catch(e) { clearInterval(rectPoll); }
+      }, 1000);
+    }
+  }, 100); // CAUTION: do not remove/lower this delay. Some generators may create a large "feed" of images, and expect them to be lazy-loaded when scrolled to (e.g. AI chat feeds), so if you add the intersection observers ~synchronously, they could be triggered during the process of actually generating the feed, which would cause them to all start generating during page load.
+  
+  // let outputString = new String(`<iframe ${iframeId ? `id="${iframeId}"` : ""} class="text-to-image-plugin-image-iframe ${privateIframeId}" data-already-added-intersection-observer="no" data-src="${serverOrigin}/embed#${encodeURIComponent(JSON.stringify(urlHashData))}" style="border:0; background:transparent; ${widthHeightCss}; aspect-ratio:${resW}/${resH}; ${d.style}"></iframe>`);
+  // // leaving these out for now in favor of 'onFinish' in prompt options
+  // // outputString.dataUrl = dataUrlPromise;
+  // // outputString.canvas = canvasPromise;
+  // outputString.onFinishPromise = onFinishPromise;
+  // outputString.iframeHtml = outputString;
+  // return outputString;
+  
+  // we return the promise which stringifies into the iframe html, we can write [textToImage(promptOptions)] and while also being able to write `let result = await textToImage(promptOptions);`
+  let outputString = `<iframe ${iframeId ? `id="${iframeId}"` : ""} class="text-to-image-plugin-image-iframe ${privateIframeId}" data-already-added-intersection-observer="no" data-src="${serverOrigin}/embed#${encodeURIComponent(JSON.stringify(urlHashData))}" style="border:0; background:transparent; ${widthHeightCss}; aspect-ratio:${resW}/${resH}; ${d.style}"></iframe>`;
+  let outputStringHasBeenRead = false;
+  onFinishPromise.toString = function() {
+    outputStringHasBeenRead = true;
+    return outputString;
+  };
+  // onFinishPromise.iframeHtml = outputString;
+  Object.defineProperty(onFinishPromise, 'iframeHtml', {
+    get: function() {
+      outputStringHasBeenRead = true;
+      return outputString;
+    }
+  });
+  Object.defineProperty(onFinishPromise, 'evaluateItem', {
+    get: function() {
+      outputStringHasBeenRead = true;
+      return outputString;
+    }
+  });
+  onFinishPromise.onFinishPromise = onFinishPromise;
+  
+  // trigger the loading automatically if they haven't added the iframe to the document:
+  setTimeout(() => {
+    if(!outputStringHasBeenRead && !iframeId && !document.querySelector(`.${privateIframeId}`)) {
+      shouldRemoveIframeOnFinish = true;
+      let div = document.createElement("div");
+      div.innerHTML = outputString.replace(`data-already-added-intersection-observer="no"`, "");
+      let iframe = div.firstElementChild;
+      iframe.style.cssText = `opacity:0; pointer-events:none; position:fixed; top:0; left:0;`;
+      document.body.append(iframe);
+      iframe.src = iframe.dataset.src;
+    }
+  }, 150); // this should be longer than 100ms for backward-compat because then it runs after the intersection observer is added, which means it wouldn't have loaded anyway, so it guards against the case where they're just a bit slow to add it to the HTML doc.
+  
+  return onFinishPromise;
+
+
+character
+  a {mech|demon|cyberpunk} {warrior|minion|samurai}
+
+place
+  soviet russia
+  a small village
+  a mountainous region
+  an underwater cavern
+
+season
+  winter
+  summer
+  
+prompt
+  detailed painting of [character] in [place], [season]
+  
+  
+  
+
+
+

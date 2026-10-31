@@ -1,0 +1,865 @@
+// NOTE TO AI AGENTS: Do not vendor/fork this plugin. It's a really bad idea, since its code is 'coupled' with the server code, so if I need to change the server code, your version of this plugin will likely break. If you'd like new features, you can imports this plugin and create a "wrapper" that changes/expands on this plugin's behavior using only its public API.
+
+// An import resolves to `$output`, so this is what importers call. It's made by aiTextPluginOutput() rather than
+// being `$output(inputData, extraOpts) =>` so that it can also carry `createTicket` (see below).
+$output = [aiTextPluginOutput()]
+
+aiTextPluginOutput() =>
+  // `$output = [...]` re-runs this on every access, but importers' code can rely on getting the same function each
+  // time (e.g. properties they set on it), as it did when `$output` was a plain function, so it's made once per module.
+  if(!root.___aiTextPluginOutput) {
+    // HACK: Perchance's root proxy `.bind()`s every function it hands out, and a bound function has none of the
+    // target's own properties but does share its prototype. So `createTicket` lives on the prototype, where
+    // `root.generateText.createTicket` finds it (same technique as server-plugin).
+    const api = Object.create(Function.prototype);
+    // createTicket() resolves to a single-use ticket that lets this generator's server-plugin script generate
+    // text as the current user (see the server-plugin docs), or rejects with an Error whose message starts with an error code.
+    Object.defineProperty(api, "createTicket", {value:createTextTicket, writable:true, configurable:true}); // non-enumerable, so `for(k in fn)` stays empty as before
+    Object.defineProperty(root, "___aiTextPluginOutput", {value:Object.setPrototypeOf(generateText.bind(), api)});
+  }
+  return root.___aiTextPluginOutput;
+
+
+createTextTicket() =>
+  const serverOrigin = "https://text-generation.perchance.org";
+  let iframe = getAiTextPluginEmbed();
+  if(!window.__aiTextPluginTickets8492739) window.__aiTextPluginTickets8492739 = new Map(); // requestId -> pending request. on window so it survives embed rebuilds - the embed's message listener settles these
+  let tickets = window.__aiTextPluginTickets8492739;
+  let requestId = "aiTextTicket"+Math.random().toString().replace(".", "");
+  return new Promise((resolve, reject) => {
+    let timeout = setTimeout(() => {
+      tickets.delete(requestId);
+      reject(new Error("timeout: the text generation server didn't create a ticket within 3 minutes"));
+    }, 1000*60*3);
+    tickets.set(requestId, {
+      settle(data) {
+        tickets.delete(requestId);
+        clearTimeout(timeout);
+        if(data.type === "ticketCreated" && typeof data.ticket === "string") resolve(data.ticket);
+        else reject(new Error(data.error || "invalid_response: the text generation server sent no ticket"));
+      },
+    });
+    // if the embed isn't ready yet, its embedIsReady handler sends this (it also re-sends pending requests after an embed reload)
+    if(window.__aiTextIframeEmbedIsReady) iframe.contentWindow.postMessage({command:"createTicket", kind:"generateText", generatorName:window.generatorName, requestId}, serverOrigin);
+  });
+
+
+getAiTextPluginEmbed() =>
+  const serverOrigin = "https://text-generation.perchance.org";
+  
+  let iframe = document.querySelector("#aiTextPluginEmbedIframe");
+  if(!window.__alreadyAddedAiTextPluginStuff8492739 || !iframe) {
+    if(window.__alreadyAddedAiTextPluginStuff8492739) {
+      // self-heal (2026-08-24): the embed iframe node was removed from the DOM (e.g. generator code rewrote document.body) while these window-level flags survived — previously streamTextFromIframe then crashed with an unhandled "Cannot read properties of null (reading 'contentWindow')". Rebuild the embed and let it re-verify; the old message listener is inert (it compares event.source against its own captured, now-dead iframe).
+      window.__aiTextIframeEmbedIsReady = false;
+      window.__alreadyTriggeredAiTextPluginPreload8492739 = false;
+    }
+    iframe = document.createElement("iframe"); 
+    iframe.src = `${serverOrigin}/embed`;
+    iframe.style.cssText = "display:none; position:fixed; top:0.5rem; right:0.5rem; height:3rem; width:11rem; background:#333; border:none; border-radius:3px; box-shadow:0px 2px 4px 0px #00000066; z-index:10000";
+    iframe.id = "aiTextPluginEmbedIframe";
+    
+    setTimeout(() => {
+      if(!window.__aiTextIframeEmbedIsReady) {
+        iframe.src = `${serverOrigin}/embed?__cacheBust=${Math.random()}`;
+      }
+    }, 15*1000);
+    
+    const style = document.createElement("style");
+    style.id = "aiTextPluginStyle8492739"; // setup can re-run after a self-heal — replace rather than stack
+    document.querySelector("#aiTextPluginStyle8492739")?.remove();
+    style.textContent = `
+      @keyframes ai-text-plugin-blink { 50% { fill: transparent }} .ai-text-plugin-dot { animation: 1s ai-text-plugin-blink infinite; fill: grey; } .ai-text-plugin-dot:nth-child(2) { animation-delay: 250ms } .ai-text-plugin-dot:nth-child(3) { animation-delay: 500ms } .ai-text-plugin-loader { background-color: #f1f1f1; color: grey; }
+      
+      .ai-text-response-end-buttons-ctn:before {
+        content: "+";
+      }
+      .ai-text-response-end-buttons-ctn {
+        position:relative;
+      }
+      .ai-text-response-buttons-wrapper {
+        display:none;
+        position:absolute;
+        width: max-content;
+        bottom: 0;
+        min-height: 2.5rem;
+        pointer-events:none;
+      }
+      @media screen and (max-width: 600px) {
+        .ai-text-response-buttons-wrapper {
+          min-height: 3.5rem; /* buttons should be further apart on mobile - else 'hover' click triggers the buttons themselves */
+        }
+      }
+      
+      .ai-text-response-end-buttons-ctn:hover .ai-text-response-buttons-wrapper {
+        display:flex;
+        pointer-events:auto;
+      }
+    `;
+    document.head.appendChild(style);
+    
+    window.addEventListener('message', (event) => {
+      if(event.source !== iframe.contentWindow) return;
+      if(event.origin !== serverOrigin) return;
+
+      if(event.data.type === "embedIsReady") {   
+        window.__aiTextIframeEmbedIsReady = true;
+        // console.debug("got embedIsReady, sent verifyUser");
+        if(!window.__alreadyTriggeredAiTextPluginPreload8492739) {
+          iframe.contentWindow.postMessage({type:"verifyUser"}, serverOrigin);
+        }
+        // (re)send pending createTicket requests - a reloaded embed has forgotten them
+        for(let requestId of window.__aiTextPluginTickets8492739?.keys() || []) {
+          iframe.contentWindow.postMessage({command:"createTicket", kind:"generateText", generatorName:window.generatorName, requestId}, serverOrigin);
+        }
+      }
+      if(event.data.type === "ticketCreated" || event.data.type === "ticketError") {
+        window.__aiTextPluginTickets8492739?.get(event.data.requestId)?.settle(event.data);
+      }
+      if(event.data.type === "verified") {
+        iframe.style.display = "none";
+      }
+      if(event.data.type === "verifying") {
+        iframe.style.display = "";
+      }
+    });
+    document.body.appendChild(iframe);
+    
+    window.__alreadyAddedAiTextPluginStuff8492739 = true;
+  }
+  return iframe;
+
+
+generateText(inputData, extraOpts) =>
+
+  const serverOrigin = "https://text-generation.perchance.org";
+  let iframe = getAiTextPluginEmbed();
+  
+  if(inputData && inputData.preload === true) {
+    if(!window.__alreadyTriggeredAiTextPluginPreload8492739) {
+      (async function() {
+        while(!window.__aiTextIframeEmbedIsReady) await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 500));
+        iframe.contentWindow.postMessage({type:"preload"}, serverOrigin);
+      })();
+      window.__alreadyTriggeredAiTextPluginPreload8492739 = true;
+    }
+    return "";
+  }
+  
+  if(inputData && inputData.getMetaObject===true) {
+
+    // Fast bigram-based approx token counter thingy.
+    // About 80x faster and 200x smaller than HF tokenizer.
+    // To "train" a new fast/approx counter like this (but e.g. on a non-deepseek tokenizer), use this script:
+    //    deno run --allow-write=. --allow-net https://user.uploads.dev/file/e29eab687b1fbf129076ec6057484bb3.js --tokenizer=/abs/path/to/tokenizer.json
+    const MODEL_BASE64="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",MAGIC=[68,66,71,49],VERSION=1,EMPTY_KEY=4294967295;function decodeVarUint(A,B){let Q=0,E=0;for(;;){const g=A[B.value++];if(E|=(127&g)<<Q,0==(128&g))return E>>>0;Q+=7}}function nextPow2(A){let B=1;for(;B<A;)B<<=1;return B}function keyHash(A){let B=A>>>0;return B^=B>>>16,B=Math.imul(B,2146121005),B^=B>>>15,B=Math.imul(B,2221713035),B^=B>>>16,B>>>0}function base64ToBytes(A){const B=atob(A),Q=new Uint8Array(B.length);for(let A=0;A<B.length;A+=1)Q[A]=B.charCodeAt(A);return Q}function parseModelBytes(A){const B=new DataView(A.buffer,A.byteOffset,A.byteLength);let Q=0;for(const A of MAGIC)if(B.getUint8(Q++)!==A)throw new Error("Invalid model header.");const E=B.getUint16(Q,!0);if(Q+=2,Q+=2,1!==E)throw new Error(`Unsupported model version: ${E}`);const g=B.getFloat32(Q,!0);Q+=4;const w=B.getFloat32(Q,!0);Q+=4;const C=B.getFloat32(Q,!0);Q+=4;const D=B.getUint32(Q,!0);Q+=4;const I=B.getUint32(Q,!0);Q+=4;const M=new Int16Array(A.buffer,A.byteOffset+Q,256);Q+=M.byteLength;const P=A.subarray(Q,Q+I);Q+=I;const f=new Int16Array(A.buffer,A.byteOffset+Q,D),e=new Uint32Array(D);let v=0;const H={value:0};for(let A=0;A<D;A+=1)v+=decodeVarUint(P,H),e[A]=v>>>0;const c=nextPow2(Math.max(8,2*D)),o=new Uint32Array(c),t=new Int16Array(c);o.fill(EMPTY_KEY);for(let A=0;A<D;A+=1){const B=e[A];let Q=keyHash(B)&c-1;for(;o[Q]!==EMPTY_KEY;)Q=Q+1&c-1;o[Q]=B,t[Q]=f[A]}return{bias:g,unigramScale:w,bigramScale:C,unigramWeights:M,tableKeys:o,tableWeights:t}}const model=parseModelBytes(base64ToBytes(MODEL_BASE64)),encoder=new TextEncoder,mask=model.tableKeys.length-1;function lookupPairWeight(A){let B=keyHash(A)&mask;for(;;){const Q=model.tableKeys[B];if(Q===EMPTY_KEY)return 0;if(Q===A)return model.tableWeights[B]/model.bigramScale;B=B+1&mask}}
+    function countTokensApprox(A){const B=encoder.encode(A);let Q=model.bias,E=256;for(let A=0;A<B.length;A+=1){const g=B[A];Q+=model.unigramWeights[g]/model.unigramScale,Q+=lookupPairWeight(257*E+g),E=g}return Q+=lookupPairWeight(257*E+256),Q};
+    
+    return {
+      countTokens: function(text) {
+        return Math.ceil(countTokensApprox(text));
+        // return Math.ceil(text.length/3.6); // old, very bad approximation
+      },
+      idealMaxContextTokens: 6000, // this is just a recommendation - not a fundamental limit. and it will increase over time.
+    };
+  }
+  // console.debug("inputData:", inputData);
+  if(!inputData) return "(Error: No input data given to the ai text plugin.)";
+  if(inputData.instructions) {
+    if(inputData.outputTo) {
+      inputData.outputTo.value = "(Error: Looks like you wrote 'instructions = ...' instead of 'instruction = ...' in your ai-text-plugin prompt data?)";
+    } else {
+      return "(Error: Looks like you wrote 'instructions = ...' instead of 'instruction = ...' in your ai-text-plugin prompt data?)";
+    }
+  }
+  
+  if(typeof inputData === "string" || inputData instanceof String) {
+    inputData = {instruction:inputData+""}
+    if(!extraOpts) extraOpts = {};
+    if(extraOpts.startWith) inputData.startWith = extraOpts.startWith;
+    if(extraOpts.stopSequences) inputData.stopSequences = extraOpts.stopSequences;
+    if(extraOpts.hideStartWith) inputData.hideStartWith = extraOpts.hideStartWith;
+    if(extraOpts.outputTo) inputData.outputTo = extraOpts.outputTo;
+    if(extraOpts.outputTo) inputData.outputTo = extraOpts.outputTo;
+    if(extraOpts.onChunk) inputData.onChunk = extraOpts.onChunk;
+    if(extraOpts.onStart) inputData.onStart = extraOpts.onStart;
+    if(extraOpts.onFinish) inputData.onFinish = extraOpts.onFinish;
+    if(extraOpts.render) inputData.render = extraOpts.render;
+    if(extraOpts.endButtons) inputData.endButtons = extraOpts.endButtons;
+  }
+  
+  // REMEMBER: if you add more inputs, you need to also update `window.__continueAiTextResponseClickHandler`
+  let hideStartWith = inputData.hideStartWith; // get the 'concrete' value in case it was dynamic like `hideStartWith = [ ... ]` - this is important because the condition in the square brackets could change later
+  
+  let instruction = inputData.instruction;
+  // Vision attachments: `instruction` may be an ARRAY of text parts and at
+  // most ONE image Blob/File (png/jpeg/webp; GIF is not supported). The image
+  // is inserted into the prompt exactly where it appears in the array. Example:
+  //   generateText({instruction: ["Describe this image:", imageBlob], startWith: "..."})
+  if(Array.isArray(instruction) && instruction.some(p => (typeof Blob !== "undefined" && p instanceof Blob))) {
+    let imageCount = 0;
+    instruction = instruction.map(part => {
+      if(part instanceof Blob) {
+        imageCount++;
+        if(imageCount > 1) throw new Error("ai-text-plugin: only ONE image attachment is allowed per generateText call.");
+        if(!/^image\/(png|jpeg|webp)$/.test(part.type)) throw new Error(`ai-text-plugin: attachment must be a png/jpeg/webp image Blob (got type "${part.type || "unknown"}"). GIFs are not supported.`);
+        if(part.size > 20*1024*1024) throw new Error("ai-text-plugin: attachment image is too large (max 20MB before re-encoding).");
+        return part;
+      }
+      if(typeof part === "function") { let v = part({}); return typeof v === "string" ? v : v.toString(); }
+      if(part && typeof part !== "string" && part.evaluateItem !== undefined) return part.evaluateItem.toString();
+      return String(part ?? "");
+    });
+    // NOTE: `instruction` stays an ARRAY from here on; text-only helpers below
+    // use instructionTextOnly.
+  } else if(typeof instruction === "function") {
+    instruction = instruction({}); // this is useful as a way to give a string that should not be evaluated - since e.g. instruction = [textareaEl.value] will actually evaluate the text when we call inputData.instruction
+    if(typeof instruction !== "string") instruction = instruction.toString();
+  } else if(Array.isArray(instruction) && instruction.evaluateItem === undefined) {
+    // Text-only ARRAY from plain JS (2026-08-24 bug report: root.generateText({instruction:
+    // ["hello"]}) threw "reading 'toString'"): no Blob, so the vision branch above skips it,
+    // and no perchance evaluateItem wrapper, so the generic branch below crashed. Treat the
+    // parts as text, same per-part rules as the vision branch, joined.
+    instruction = instruction.map(part => {
+      if(typeof part === "function") { let v = part({}); return typeof v === "string" ? v : v.toString(); }
+      if(part && typeof part !== "string" && part.evaluateItem !== undefined) return part.evaluateItem.toString();
+      return String(part ?? "");
+    }).join("");
+  } else if(instruction) {
+    if(typeof instruction !== "string") {
+      instruction = instruction.evaluateItem;
+    }
+    instruction = instruction.toString();
+  } else {
+    instruction = "Write something."; // default instruction
+  }
+  const instructionTextOnly = Array.isArray(instruction) ? instruction.filter(p => !(typeof Blob !== "undefined" && p instanceof Blob)).join("") : instruction;
+  
+  let startWith = inputData.startWith;
+  if(typeof startWith === "function") {
+    startWith = startWith({}); // this is useful as a way to give a string that should not be evaluated - since e.g. startWith = [textareaEl.value] will actually evaluate the text when we call inputData.startWith
+    if(typeof startWith !== "string") startWith = startWith.toString();
+  } else if(startWith) {
+    if(typeof startWith !== "string") {
+      startWith = startWith.evaluateItem;
+    }
+    startWith = startWith.toString();
+    // We trim whitespace off the end due to the classic tokenizer problem (most word tokens start with a space as of 2023 tokenizers).
+    // This of course does mean that you can't "force" the model to start with a space after a word, but it's worth that trade-off until we get models with better tokenizers.
+    startWith = startWith.replace(/ +$/g, ""); // CAUTION: Don't trim newlines - only spaces. Because e.g. the story writer demo relies on being able to start with 2 new lines before the paragraph that the AI is about to generate, since if the AI generates them, it'll trigger the stop sequence before it even gets to start writing the new paragraph
+  } else {
+    startWith = "";
+  }
+
+  let stopSequences = inputData.stopSequences;
+  if(typeof stopSequences === "function") {
+    stopSequences = stopSequences({});
+  } else if(stopSequences) {
+    if(!Array.isArray(stopSequences)) {
+      stopSequences = stopSequences.selectAll.map(n => n.evaluateItem);
+    }
+  } else {
+    stopSequences = [];
+  }
+  
+  let textareaLoadingIndicatorHandler;
+  
+  // REMEMBER: if you add more inputs, you need to also update `window.__continueAiTextResponseClickHandler`
+  
+  let concreteInputs = {startWith, instruction, stopSequences};  // <-- CAUTION: the startWith property of this is set to the full startWith+generatedText after generation, and the startWith can be changed after generation for the `editAiTextResponseClickHandler` feature - ctrl+f for `concreteInputs.startWith =`. Use `originalConcreteInputs` for original inputs.
+  // structuredClone (not JSON stringify) so image Blobs in array-form
+  // instructions survive; fall back to JSON for exotic environments.
+  let originalConcreteInputsClone;
+  try { originalConcreteInputsClone = structuredClone(concreteInputs); }
+  catch(e) { originalConcreteInputsClone = JSON.parse(JSON.stringify({...concreteInputs, instruction: instructionTextOnly})); }
+  const originalConcreteInputs = Object.freeze(originalConcreteInputsClone);
+
+  let placeholderEl;
+  let placeholderElDidInitiallyExist = false; // this is for keepalive stuff - so we can cancel a queued up generation if the placeholder is removed
+  let userStoppedGeneration = false;
+  
+  let textStreamController;
+  const textStream = new ReadableStream({
+    start(c) {
+      textStreamController = c;
+    }
+  });
+  
+  let darkModeEnabled = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const animatedLoadingSvg = `<svg style="${darkModeEnabled ? "filter:invert(0.85);" : ""} height:1rem; width:2rem; overflow:hidden; border-radius:3px; vertical-align:top; position:relative; top:0.07rem; margin-left:0.125rem;" height="1rem" width="2rem" class="ai-text-plugin-loader"> <circle class="ai-text-plugin-dot" cx="0.5em" cy="0.5em" r="0.2em" style="fill:grey;"></circle> <circle class="ai-text-plugin-dot" cx="1em" cy="0.5em" r="0.2em" style="fill:grey;"></circle> <circle class="ai-text-plugin-dot" cx="1.5em" cy="0.5em" r="0.2em" style="fill:grey;"></circle> </svg>`;
+  
+  let generatedText = "";
+  let finishedGenerating = false;
+  let thereWasAnErrorDuringGeneration = false;
+  
+  let onFinishPromiseResolver;
+  let onFinishPromiseRejecter;
+  let onFinishPromise = new Promise((resolve, reject) => {
+    onFinishPromiseResolver = resolve;
+    onFinishPromiseRejecter = reject;
+  });
+  
+  let completionId = "aiTextCompletion"+Math.random().toString().replace(".", "");
+  let lastGeneratedChunkReceivedTime = null;
+  const generationStartTime = Date.now(); // arms the silent-stream backstop even when NO chunk ever arrives (2026-08-26 bug report: no-first-chunk hangs were un-timed-out forever)
+
+  async function streamTextFromIframe(chunkCallback) { 
+    let postData = {};
+    postData.instruction = concreteInputs.instruction || "";
+    postData.startWith = concreteInputs.startWith || "";
+    postData.stopSequences = concreteInputs.stopSequences || [];
+    postData.generatorName = window.generatorName;
+
+    if(Array.isArray(postData.instruction)) {
+      // apply marker to the first text part with a space
+      let parts = postData.instruction.slice();
+      let marked = false;
+      for(let i = 0; i < parts.length; i++) {
+        if(typeof parts[i] === "string" && parts[i].includes(" ")) { parts[i] = parts[i].replace(" ", " "); marked = true; break; }
+      }
+      if(!marked) {
+        for(let i = parts.length - 1; i >= 0; i--) {
+          if(typeof parts[i] === "string") { parts[i] = `${parts[i]} `; marked = true; break; }
+        }
+        if(!marked) parts.push(" ");
+      }
+      postData.instruction = parts;
+    } else {
+      postData.instruction = postData.instruction.replace(" ", " ");
+      if(!postData.instruction.includes(" ")) { postData.instruction = `${postData.instruction} `; }
+    } 
+    
+    let url = `${serverOrigin}/api/generate`;
+    let haveReceivedFirstTextChunk = false;
+    let haveReceivedLastTextChunk = false;
+    let retriedUnknownRequestId = false;
+    function messageHandler(event) {
+      if(event.data.requestId !== completionId) return;
+      
+      // console.debug("streamTextFromIframe messageHandler:", event.data);
+      if(event.data.type === "streamData") {
+        lastGeneratedChunkReceivedTime = Date.now();
+        let text = event.data.value.text;
+        let data = {text};
+        if(event.data.value.stopReason) data.stopReason = event.data.value.stopReason;
+        
+        // console.debug("event.data.value:", event.data.value);
+        if(!haveReceivedFirstTextChunk) {
+          data.isFirstChunk = true;
+          haveReceivedFirstTextChunk = true;
+        }
+        if(haveReceivedLastTextChunk) {
+          console.error("haveReceivedLastTextChunk but about to send another chunk??? maybe recieving streamEnd before it's actually finished??");
+        }
+        if(event.data.value.final) {
+          data.isLastChunk = true; // remember, a chunk can be both the first *and* last chunk
+          haveReceivedLastTextChunk = true;
+        }
+        chunkCallback(data);
+      } else if (event.data.type === "streamEnd") {
+        // console.debug(`ai-text-plugin Received 'streamEnd' for ${completionId}`);
+        window.removeEventListener("message", messageHandler);
+        if(!haveReceivedLastTextChunk) {
+          // this can happen if stream is aborted, or if .stop() was called in userland, and perhaps for other reasons, so we send a last "dummy" chunk
+          chunkCallback({text:"", stopReason:"user", isLastChunk:true, isFirstChunk:!haveReceivedFirstTextChunk});
+          haveReceivedLastTextChunk = true;
+        }
+      } else if (event.data.type === "streamError") {
+        if(userStoppedGeneration && event.data.status === "stale") {
+          // this is not actually an error, but iframe embed can't know that, so it sends us this, which we just ignore.
+        } else if(event.data.status === "unknown_request_id" && !haveReceivedFirstTextChunk && !finishedGenerating && !retriedUnknownRequestId) {
+          // (2026-08-24 bug report): the embed self-reloads to escape a wedged verification,
+          // wiping its known-request registry — every in-flight/queued generation then surfaced
+          // a red "error: unknown request id" banner mid-play. This plugin still holds the full
+          // request, so re-issue it ONCE instead of failing (only when no text has arrived yet;
+          // a partially-streamed generation keeps the honest error path below).
+          retriedUnknownRequestId = true;
+          console.warn("ai-text-plugin: embed forgot this request (likely an embed reload) — re-issuing startStream once");
+          setTimeout(() => {
+            try { if(iframe && iframe.contentWindow) iframe.contentWindow.postMessage({ type: "startStream", url, postData, requestId:completionId, perchanceGeneratorOrigin:window.location.origin }, serverOrigin); } catch(e) { console.error(e); }
+          }, 1000);
+          return; // keep listening — the retried stream reuses this handler
+        } else {
+          if(!finishedGenerating) { // <-- just to guard against weird timing stuff
+            thereWasAnErrorDuringGeneration = true;
+            chunkCallback({text:"", error:true, isLastChunk:!haveReceivedLastTextChunk, isFirstChunk:!haveReceivedFirstTextChunk});
+            let div = document.createElement("div");
+            div.innerHTML = `<div style="z-index:1000; position: fixed; bottom: 1rem; width: 100%; pointer-events:none;"><span style=" padding: 0.5rem; background: #ac2c2c; border-radius: 3px; color: white; pointer-events:auto;">error: ${event.data.status.replaceAll("_", " ")}</span></div>`;
+            div = div.firstElementChild;
+            document.body.appendChild(div);
+            setTimeout(() => {
+              div.remove();
+            }, 1000*5);
+          }
+        }
+        window.removeEventListener("message", messageHandler);
+      } else if (event.data.type === "middleOut") {
+        // the embed had to cut the middle out of the input to fit the context window. we warn here (not in the embed) because the generator's frame is the console that generator-builders (incl. the AI agent) can see.
+        let d = event.data;
+        let tokensInfo = d.originalTotalTokens ? ` (~${d.originalTotalTokens} -> ~${d.finalTotalTokens} tokens)` : ` (-> ~${d.finalTotalTokens} tokens)`;
+        console.warn(`ai-text-plugin: The input (instruction + startWith) was longer than the AI model's context window allows (~${d.maxContextTokens} tokens max for the input), so the MIDDLE of the text was cut out ("middle-out" truncation) before it was sent to the AI: ${d.originalTotalChars} -> ${d.finalTotalChars} characters${tokensInfo}. The AI did not see the removed middle part. To avoid this, keep the input shorter - e.g. trim old chat/story history (keep only the most recent messages), summarize older history, or shorten long lore/instructions. Tip: if you imported this plugin as "ai", then ai({getMetaObject:true}).countTokens(text) gives an approximate token count.`);
+      }
+    }
+    
+    window.addEventListener("message", messageHandler);
+    
+    while(!window.__aiTextIframeEmbedIsReady) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if(inputData._debug) postData._debug = JSON.parse(JSON.stringify(inputData._debug));
+    if(!iframe || !iframe.isConnected || !iframe.contentWindow) {
+      // the embed iframe vanished mid-flight (e.g. generator code rewrote document.body) — fail this generation cleanly through the normal error path instead of throwing an unhandled rejection from inside a timer (2026-08-24). The next generateText call rebuilds the embed.
+      console.error("ai-text-plugin: embed iframe is missing/detached — failing this generation cleanly");
+      window.removeEventListener("message", messageHandler);
+      thereWasAnErrorDuringGeneration = true;
+      chunkCallback({text:"", error:true, isLastChunk:true, isFirstChunk:!haveReceivedFirstTextChunk});
+      return;
+    }
+    iframe.contentWindow.postMessage({ type: "startStream", url, postData, requestId:completionId, perchanceGeneratorOrigin:window.location.origin }, serverOrigin);
+    // console.debug("sent startStream request to iframe");
+  }
+
+  async function editAiTextResponseClickHandler(el) {    
+    let saveButton = document.createElement("button");
+    saveButton.style.cssText = "position:fixed; z-index:501;";
+    saveButton.textContent = "💾";
+    document.body.append(saveButton);
+
+    let textarea = document.createElement("textarea");
+    textarea.style.cssText = "z-index:500; display:block; position:fixed; min-height:2rem; min-width:10rem;";
+    textarea.value = concreteInputs.startWith;
+    document.body.append(textarea);
+    let updateCoverPosition = () => {
+      let rect = el.getBoundingClientRect();
+      textarea.style.left = `${rect.left}px`;
+      textarea.style.top = `${rect.top}px`;
+      textarea.style.width = `${rect.width}px`;
+      textarea.style.height = `${rect.height+10}px`;
+
+      let textareaRect = textarea.getBoundingClientRect(); // Use coverElement's dimensions
+      saveButton.style.left = `${textareaRect.right-saveButton.offsetWidth}px`;
+      saveButton.style.top = `${textareaRect.bottom}px`;
+    };
+    updateCoverPosition();
+    window.addEventListener('scroll', updateCoverPosition);
+    window.addEventListener('resize', updateCoverPosition);
+    
+    const observer = new MutationObserver((mutationsList) => {
+      for(let mutation of mutationsList) {
+        for(let node of mutation.removedNodes) {
+          if(node.contains(el)) {
+            textarea.remove();
+            saveButton.remove();
+            window.removeEventListener('scroll', updateCoverPosition);
+            window.removeEventListener('resize', updateCoverPosition);
+            observer.disconnect();
+            return;
+          }
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    await new Promise(r => saveButton.onclick=r); 
+
+    let endButtonsCtn = el.querySelector(".ai-text-response-end-buttons-ctn");
+    endButtonsCtn.remove();
+
+    concreteInputs.startWith = textarea.value;
+    
+    // we do this because the onFinishPromise is actually the return value of this function, but it also serves as an object with a bunch of handy properties like .liveResponseText, .stop(), etc.
+    onFinishPromise.liveResponseText = textarea.value;
+    
+    // el.innerHTML = textarea.value;
+    // el.appendChild(endButtonsCtn);
+    renderResponseTextIntoContainer(textarea.value, {addEndButtons:true, isFinalRender:true});
+
+    window.removeEventListener('scroll', updateCoverPosition);
+    window.removeEventListener('resize', updateCoverPosition);
+    textarea.remove();
+    saveButton.remove();
+  };
+  
+  async function continueAiTextResponseClickHandler(el, opts={}) {    
+    let instruction = concreteInputs.instruction;
+    let startWith = concreteInputs.startWith;
+    let stopSequences = concreteInputs.stopSequences;
+    
+    if(opts.appendContinuationSuffix) startWith += "\n";
+    
+    responseEndButtonsCtn.remove();
+    let obj = generateText({instruction, startWith, stopSequences, style:inputData.style, outputTo:el, render:inputData.render, onFinish:inputData.onFinish, onChunk:inputData.onChunk});
+    el.innerHTML += obj.loadingIndicatorHtml;
+    let result = await obj;
+    if(!opts.appendContinuationSuffix && result.generatedText === "" && !result.text.endsWith("\n\n")) {
+      // no text was generated, so try again with a suffix that's likely to trigger more text.
+      // TODO: maybe check stopReason here too?
+      continueAiTextResponseClickHandler(el, {appendContinuationSuffix:true})
+    }
+  };
+  
+  let responseEndButtonsCtn;
+  {
+    let buttonGap = "0.25rem";
+    if(window.innerWidth < 600) buttonGap = "1.5rem";
+    
+    let darkModeEnabled = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    let responseEndButtonsHtml = `<span class="ai-text-response-end-buttons-ctn" style="display: inline-flex;background:${darkModeEnabled ? "#666666" : "#f1f1f1"};color: ${darkModeEnabled ? "#d5d5d5" : "grey"};height: 1rem;width: 1rem;border-radius: 3px;vertical-align: top;position: relative;top: 0.07rem;margin-left: 0.125rem;align-items: center;justify-content: center;cursor: pointer; font-size:80%">
+      <div class="ai-text-response-buttons-wrapper">
+        <button class="ai-text-continue-button" style="height:min-content;">▶️</button>
+        <button class="ai-text-edit-button" style="height:min-content; margin-left:${buttonGap}">✏️</button>
+      </div>
+    </span>`;
+    responseEndButtonsCtn = document.createElement("div");
+    responseEndButtonsCtn.innerHTML = responseEndButtonsHtml;
+    responseEndButtonsCtn = responseEndButtonsCtn.firstElementChild;
+    if(inputData.endButtons?.evaluateItem === "none") {
+      responseEndButtonsCtn.style.display = "none";
+    }
+    responseEndButtonsCtn.querySelector(".ai-text-continue-button").onclick = function() {
+      // console.debug("wrapper display:", this.closest('.ai-text-response-buttons-wrapper').style.display);
+      let responseCtn = this.closest(".ai-text-response-end-buttons-ctn").__aiTextResponseCtn || this.closest('.ai-text-response-ctn');
+      continueAiTextResponseClickHandler(responseCtn);
+    };
+    responseEndButtonsCtn.querySelector(".ai-text-edit-button").onclick = function() {
+      // console.debug("wrapper display:", this.closest('.ai-text-response-buttons-wrapper').style.display);
+      let responseCtn = this.closest(".ai-text-response-end-buttons-ctn").__aiTextResponseCtn || this.closest('.ai-text-response-ctn');
+      editAiTextResponseClickHandler(responseCtn);
+    };
+  }
+  
+  function escapeRegExp(text) {
+    return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+  }
+  
+  let startWithRegex;
+  
+  function renderResponseTextIntoContainer(response, opts={}) {
+    if(!inputData.outputTo && !placeholderEl) return; // <-- indicates that they're doing things manually with e.g. onFinishPromise/onChunk/etc.
+    
+    if(hideStartWith) { // note that `hideStartWith` is purely 'visual' - it's just a handy helper for a common case (that could otherwise be solved with `render`)
+      if(!startWithRegex) startWithRegex = new RegExp("^"+escapeRegExp(concreteInputs.startWith));
+      response = response.replace(startWithRegex, "");
+    }
+    if(inputData.render) {
+      response = inputData.render({text:response, isPartial:!opts.isFinalRender});
+    }
+    if(inputData.outputTo) {
+      if(typeof inputData.outputTo.value == "string") { // textarea, input, or user's custom object with string `.value` property
+        inputData.outputTo.value = response;
+        if(inputData.outputTo.tagName === "TEXTAREA") {
+          if(inputData.outputTo.scrollTop > (inputData.outputTo.scrollHeight - inputData.outputTo.offsetHeight)-30) { // <-- if the text box is already scrolled near the end of the text
+            inputData.outputTo.scrollTop = 9999999999; // scroll down to bottom of text box
+          }
+        }
+      } else {
+        inputData.outputTo.innerHTML = response;
+        if(opts.addEndButtons) {
+          responseEndButtonsCtn.title = `Inputs that were used:\n\ninstruction=${Array.isArray(concreteInputs.instruction) ? concreteInputs.instruction.map(p => (typeof Blob !== "undefined" && p instanceof Blob) ? "[image]" : p).join("") : concreteInputs.instruction}\n\nstartWith=${concreteInputs.startWith}`;
+          responseEndButtonsCtn.__aiTextResponseCtn = inputData.outputTo;
+          inputData.outputTo.append(responseEndButtonsCtn);
+        }
+      }
+    } else {
+      if(typeof placeholderEl.value == "string") { // textarea, input, or user's custom object with string `.value` property
+        placeholderEl.value = response;
+      } else {
+        placeholderEl.innerHTML = response;
+        if(opts.addEndButtons) {
+          responseEndButtonsCtn.title = `Inputs that were used:\n\ninstruction=${Array.isArray(concreteInputs.instruction) ? concreteInputs.instruction.map(p => (typeof Blob !== "undefined" && p instanceof Blob) ? "[image]" : p).join("") : concreteInputs.instruction}\n\nstartWith=${concreteInputs.startWith}`;
+          placeholderEl.append(responseEndButtonsCtn);
+        }
+      }
+    }
+  }
+  
+  let gotFirstChunk = false;
+  let chunks = [];
+  let generatedChunks = []; // difference from `chunks` is that this doesn't include the user-specified `startWith` text
+  let alreadyDoneOnFinishStuff = false; // just as an extra guard against bugs
+  
+  function doOnFinishStuff({stopReason}) {
+    if(alreadyDoneOnFinishStuff) return; // this is possible because e.g. userland onChunk can synchronously call .stop(), so it gets executed after last chunk arrival via stopFn(), but before 'normal' doOnFinishStuff call
+    alreadyDoneOnFinishStuff = true;
+
+    console.debug("FINISHED STREAMING.");
+
+    let finishData = new String(chunks.join(""));
+    finishData.text = chunks.join("");
+    finishData.generatedText = generatedChunks.join("");
+    finishData.stopReason = stopReason;
+
+    if(inputData.onFinish) {
+      try { inputData.onFinish(finishData); } catch(e) { console.error("error in onFinish:", e); }
+    }
+    onFinishPromiseResolver(finishData);
+    generatedText = generatedChunks.join("");
+
+    if(textareaLoadingIndicatorHandler) textareaLoadingIndicatorHandler.stop();
+    try { textStreamController.close(); } catch(e) { console.error(e); }
+  }
+  function stopFn() {
+    if(finishedGenerating) return;
+    finishedGenerating = true;
+
+    if(!gotFirstChunk && placeholderEl) placeholderEl.innerHTML = ""; // clear the svg 'loading' dots
+
+    doOnFinishStuff({stopReason:"user"});
+  }
+
+  async function startStreamingResponse() {
+    try {
+      (async function() {
+        await new Promise(r => setTimeout(r, 500));
+        while(true) {
+          if(userStoppedGeneration) {
+            console.debug("stopping keepalives due to `userStoppedGeneration`");
+            break;
+          }
+          if(finishedGenerating) { console.debug("stopping keepalives due to `finishedGenerating`"); break; }
+          if(placeholderElDidInitiallyExist && !document.querySelector(`#${completionId}`)) { console.debug("stopping keepalives due to `placeholderEl`"); break; } // placeholderEl no longer exists in the DOM, so user probably clicked 'randomize' or whatever while previous one was still loading, hence we abort previous one by stopping the keepalives, which drops it from the queue
+          if(inputData.outputTo && (!document.body.contains(inputData.outputTo) || inputData.outputTo.dataset.aiTextCompletionId !== completionId))  { console.debug("stopping keepalives due to `outputTo`"); break; }
+          // Silent-stream backstop (2026-08-24; armed-from-start 2026-08-26): if no chunk has
+          // arrived for 600s — measured from the last chunk, or from request start when no chunk
+          // EVER arrived (the previously-uncovered case: e.g. a wedged server slot answering
+          // waiting_for_prev forever, or a broken embed channel) — the generation is dead:
+          // finalize honestly instead of hanging forever with keepalives running.
+          if(Date.now() - (lastGeneratedChunkReceivedTime !== null ? lastGeneratedChunkReceivedTime : generationStartTime) > 1000*600) {
+            // 600s, not 120s (2026-08-25 owner decision): the embed's own recovery ladder
+            // (60s watchdog -> continuation retries) takes up to ~6.5min worst-case; a
+            // shorter backstop could finalize partial text that WOULD have recovered,
+            // and generators rarely handle errors — so this only catches true zombies.
+            try { navigator.sendBeacon && navigator.sendBeacon("https://ai-agent.perchance.org/api/aiAgent/clientLog", new Blob([JSON.stringify({ kind: "ai-text-backstop-fired", detail: lastGeneratedChunkReceivedTime === null ? "no first chunk within " + Math.round((Date.now()-generationStartTime)/1000) + "s of request start" : "silent " + Math.round((Date.now()-lastGeneratedChunkReceivedTime)/1000) + "s after streaming began", generator: String(window.generatorName || "") })], { type: "text/plain" })); } catch(e) {}
+            console.error("ai-text-plugin: no chunks for 600s (" + (lastGeneratedChunkReceivedTime === null ? "stream never started" : "stream had started") + ") — finalizing as interrupted (silently-dead stream)");
+            let allChunksJoined = chunks.join("");
+            thereWasAnErrorDuringGeneration = true;
+            finishedGenerating = true;
+            concreteInputs.startWith = allChunksJoined;
+            renderResponseTextIntoContainer(allChunksJoined, {addEndButtons:true, isFinalRender:true});
+            doOnFinishStuff({stopReason:"interrupted"});
+            break;
+          }
+          
+          try { iframe.contentWindow.postMessage({ type: "streamKeepAlive", requestId:completionId }, serverOrigin); }
+          catch(e) { console.error("ai-text-plugin: keepalive failed (embed iframe gone?) — stopping keepalives for this generation", e); break; }
+          console.debug("streamKeepAlive sent");
+          await new Promise(r => setTimeout(r, 800));
+          // if(window.devTest98375290385) await new Promise(r => setTimeout(r, 10000000000));
+        }
+        try { stopFn(); } catch(e) { console.error(e); }; // need to call stopFn() here (and not just wait for it to be called in streamTextFromIframe) because otherwise it only gets called if streamTextFromIframe gets called again, which it *might not*
+        try { iframe.contentWindow.postMessage({ type: "stopStream", requestId:completionId }, serverOrigin); } catch(e) { console.error(e); };
+      })();
+      
+      streamTextFromIframe(function(data) {
+        if(userStoppedGeneration) {
+          if(!finishedGenerating) stopFn();
+          return;
+        }
+        if(placeholderElDidInitiallyExist && !document.querySelector(`#${completionId}`)) {
+          if(!finishedGenerating) stopFn();
+          return;
+        }
+        if(inputData.outputTo && (!document.body.contains(inputData.outputTo) || inputData.outputTo.dataset.aiTextCompletionId !== completionId)) {
+          if(!finishedGenerating) stopFn();
+          return;
+        }
+        if(finishedGenerating) {
+          thereWasAnErrorDuringGeneration = true;
+          console.error("We received a chunk of text even though we've already finishedGenerating?");
+          return;
+        }
+        
+        // add the startWith chunk before the first 'real' chunk:
+        if(data.isFirstChunk && concreteInputs.startWith && !hideStartWith) {
+          chunks.push(concreteInputs.startWith);
+          textStreamController.enqueue(concreteInputs.startWith);
+          if(inputData.onChunk) {
+            inputData.onChunk({fullTextSoFar:chunks.join(""), textChunk:concreteInputs.startWith, isFromStartWith:true});
+          }
+        }
+        
+        if(data.error) {
+          let allChunksJoined = chunks.join("");
+          thereWasAnErrorDuringGeneration = true;
+          finishedGenerating = true;
+          
+          concreteInputs.startWith = allChunksJoined;
+          renderResponseTextIntoContainer(allChunksJoined, {addEndButtons:true, isFinalRender:true});
+          
+          doOnFinishStuff({stopReason:"error"});
+        } else {
+          generationLastKnownToBeWorkingAt = Date.now();
+          if(data.isFirstChunk) {
+            gotFirstChunk = true;
+            if(placeholderEl) placeholderEl.innerHTML = ""; // clear the svg 'loading' dots
+            if(inputData.beforeFirstChunk) {
+              inputData.beforeFirstChunk({});
+            }
+          }
+          
+          generatedChunks.push(data.text);
+          chunks.push(data.text);
+          textStreamController.enqueue(data.text);
+          
+          if(inputData.onChunk) {
+            try { // user-land handler may throw error
+              inputData.onChunk({fullTextSoFar:chunks.join(""), textChunk:data.text}); // `data.text` is the full text so far (like in onFinish, render, etc.), and `data.chunk` is the most recent chunk (the one that triggered this call to onChunk)
+            } catch(e) {
+              console.error("Error in onChunk:", e);
+            } 
+          }
+
+          onFinishPromise.liveResponseText = chunks.join("");
+          
+          renderResponseTextIntoContainer(chunks.join(""), {addEndButtons:!!data.isLastChunk, isFinalRender:!!data.isLastChunk});
+          if(data.isLastChunk) {
+            concreteInputs.startWith = chunks.join(""); // update the startWith for 'continue' and 'edit' button use
+            finishedGenerating = true;
+            doOnFinishStuff({stopReason:data.stopReason});
+          }
+        }
+      });    
+
+    } catch(e) {
+      thereWasAnErrorDuringGeneration = true;
+      finishedGenerating = true;
+      // onFinishPromiseRejecter();
+      doOnFinishStuff({stopReason:"error"});
+      
+      console.error(e);
+      await new Promise(r => setTimeout(r, 1000));
+      iframe.contentWindow.postMessage({type:"verifyUser"}, serverOrigin); // probably not necessary, but just in case (it'll only re-verify if it's actually needed anyway)
+    }
+  }
+  
+  function onVisible(element, callback) {
+    new IntersectionObserver((entries, observer) => {
+      entries.forEach(entry => {
+        if(entry.intersectionRatio > 0) {
+          callback(element);
+          observer.disconnect();
+        }
+      });
+    }).observe(element);
+    if(!callback) return new Promise(r => callback=r);
+  }
+    
+  setTimeout(async () => {
+    // give placeholderEl a chance to be put into the DOM
+    placeholderEl = document.querySelector(`#${completionId}`); // this will be null if they're using outputTo or are just doing things fully manually onFinishPromise/onChunk/etc.
+    if(placeholderEl) placeholderElDidInitiallyExist = true;
+    // wait for placeholderEl to become visible:
+    if(placeholderElDidInitiallyExist && !inputData.outputTo) {
+      await onVisible(placeholderEl);
+    }
+    
+    if(inputData.onStart) {
+      inputData.onStart(onFinishPromise); // note that `onFinishPromise` has all the data attached, like `inputs`, `liveResponseText`, etc. - see below
+      if(inputData.outputTo && inputData.outputTo.tagName === "TEXTAREA") {
+        try { textareaLoadingIndicatorHandler = addTextareaLoadingIndicator(inputData.outputTo); } catch(e) { console.error(e); } // try/catch because new code
+      }
+    }
+    startStreamingResponse(); 
+  }, 100);
+  
+  let beforeLoaderHtml = "";
+  if(!inputData.outputTo && !hideStartWith) {
+    beforeLoaderHtml = inputData.render ? inputData.render({text:concreteInputs.startWith, isPartial:true}) : concreteInputs.startWith;
+  }
+  
+  if(inputData.outputTo) {
+    inputData.outputTo.dataset.aiTextCompletionId = completionId; // this is used for keepalive stuff - if a queued request is going to output to an outputTo element, but that element no longer has the correct `dataset.aiTextCompletionId` then we drop it from the queue
+  }
+  
+  onFinishPromise.inputs = originalConcreteInputs;
+  onFinishPromise.liveResponseText = concreteInputs.startWith; // this is full text (including startWith, which is why this property isn't called liveGeneratedText, or liveOutputText) and is live-updated as chunks come in. and note that it can also be edited by the user using the end buttons
+  onFinishPromise.textStream = textStream;
+  onFinishPromise.onFinishPromise = onFinishPromise; // backwards-compat with old return object
+  onFinishPromise.stop = () => {
+    userStoppedGeneration = true;
+    try { stopFn(); } catch(e) { console.error(e); };
+    try { iframe.contentWindow.postMessage({ type: "stopStream", requestId:completionId }, serverOrigin); } catch(e) { console.error(e); };
+    return onFinishPromise; // <-- so .stop() returns the output data
+  };
+  onFinishPromise.id = completionId;
+  onFinishPromise.loadingIndicatorHtml = animatedLoadingSvg; // <-- just a littler helper for people who are e.g. using onFinishPromise/onChunk/etc. but want to add a loading indicator to the page manually
+  onFinishPromise.toString = function() { // this object stringifies into the default placeholder element
+    return `<span class="ai-text-response-ctn" id="${completionId}" style="white-space:pre-wrap; ${inputData.style ? inputData.style : ""}">${beforeLoaderHtml}${animatedLoadingSvg}</span>`;
+  };
+  onFinishPromise.submitUserRating = async ({score, reason}) => {
+    if(!finishedGenerating || thereWasAnErrorDuringGeneration) {
+      console.error(thereWasAnErrorDuringGeneration ? "cannot rate because there was an error during generation" : "cannot rate because it hasn't finished generating yet");
+      return;
+    }
+    if(isNaN(Number(score)) || Number(score) > 1 || Number(score) < 0) return alert(`User rating should be a value between 0 (bad) and 1 (good). Like 0.4 or 0.8, for example.`);
+    score = Number(score);
+    if(!reason) reason = "";
+    iframe.contentWindow.postMessage({ type: "rateGeneratedText", instruction: instructionTextOnly, startWith, generatedText, generatorName:window.generatorName, score, reason }, serverOrigin);
+  };
+  return onFinishPromise;
+  
+
+
+
+
+// this was causing user-agent styles (specifically background color) to be removed in dark mode in chrome for some reason.
+// it's a little too obtrusive anyway - ideally it would just be a "sliding line" that's only at the bottom of the textarea.
+// or maybe a transparent loading indicator in the top-right of the textarea.
+addTextareaLoadingIndicator(el) =>
+  // const computedStyle = getComputedStyle(el);
+  // const borderColor = computedStyle.borderColor;
+  // // Convert border color to rgba with 30% opacity
+  // const rgbaColor = borderColor.replace(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/, 'rgba($1, $2, $3, 0.3)');
+  // const className = 'blink-' + Math.random().toString(36).substring(2, 15);
+  // const style = document.createElement('style');
+  // style.innerHTML = `
+  //   @keyframes ${className}-blink {
+  //     0%, 100% {
+  //       border-color: ${borderColor};
+  //     }
+  //     50% {
+  //       border-color: ${rgbaColor};
+  //     }
+  //   }
+  //   .${className} {
+  //     animation: ${className}-blink 1s infinite;
+  //     border-color: ${borderColor}; /* must add this explicitly, since user-agent-only borders don't trigger the animation */
+  //   }
+  // `;
+  // document.head.appendChild(style);
+  // el.classList.add(className);
+  return {
+    stop: function() {
+      // el.classList.remove(className);
+      // document.head.removeChild(style);
+    },
+  };
+
+
+
+
+
+
+
+
+character
+  {mech|demon|cyberpunk} {warrior|minion|samurai}
+
+place
+  a retropunk distopia
+  a small village
+  a mountainous region
+  an underwater cavern
+  a = 10
+
+season
+  winter
+  summer
+  
+poemPrompt
+  instruction = Write a haiku about a [character] in [place] during [season].
+
+
+
+

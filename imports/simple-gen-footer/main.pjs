@@ -1,0 +1,4 @@
+$output
+	The <a href\="/useful-generators">useful generators list</a> is a handy list of simple text generators on various topics. If you're a Perchance builder then you'll probably find some of them useful for importing into your own projects.
+	If you'd like to learn how to create a random text generator, then check out the <a href\="/minimal#edit">minimal generator template</a> and the <a href\="/tutorial">tutorial</a>. It's easier than you'd think and is great fun :)
+	$output = <p>[this.joinItems("</p><p>")]</p>

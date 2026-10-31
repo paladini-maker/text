@@ -1,0 +1,333 @@
+// FORMA — AI Image Studio
+// Paste this entire file into the Perchance Code panel.
+// Runtime dependencies: official Perchance image and text-generation plugins.
+
+image = {import:text-to-image-plugin}
+aiText = {import:ai-text-plugin}
+
+$meta
+title = FORMA — AI Image Studio
+description = A custom editorial-style AI image studio powered by Perchance.
+
+studioToast(message, tone) =>
+  let toast = document.getElementById("studioToast");
+  if(!toast) return;
+  toast.textContent = message;
+  toast.className = "studio-toast is-visible " + (tone || "");
+  clearTimeout(window.__formaToastTimer);
+  window.__formaToastTimer = setTimeout(() => toast.classList.remove("is-visible"), 2800);
+
+updatePromptMetrics() =>
+  let promptEl = document.getElementById("prompt");
+  if(!promptEl) return;
+  let value = promptEl.value || "";
+  let charEl = document.getElementById("charCount");
+  let wordEl = document.getElementById("wordCount");
+  if(charEl) charEl.textContent = value.length.toLocaleString();
+  if(wordEl) wordEl.textContent = value.trim() ? value.trim().split(/\s+/).length.toLocaleString() : "0";
+
+updateGuidanceOutput(value) =>
+  let inputEl = document.getElementById("guidance");
+  let outputEl = document.getElementById("guidanceValue");
+  if(!inputEl || !outputEl) return;
+  let current = value === undefined ? inputEl.value : value;
+  outputEl.textContent = String(Math.round(Number(current) || 7));
+
+saveStudioState() =>
+  try {
+    let ids = ["prompt", "negativePrompt", "style", "resolution", "guidance", "batch", "seed"];
+    let state = {};
+    for(let id of ids) {
+      let field = document.getElementById(id);
+      if(field) state[id] = field.value;
+    }
+    localStorage.setItem("formaStudioState", JSON.stringify(state));
+  } catch(error) {
+    console.warn("FORMA could not save the current settings:", error);
+  }
+
+restoreStudioState() =>
+  let restore = () => {
+    try {
+      let saved = JSON.parse(localStorage.getItem("formaStudioState") || "{}");
+      let ids = ["prompt", "negativePrompt", "style", "resolution", "guidance", "batch", "seed"];
+      for(let id of ids) {
+        let field = document.getElementById(id);
+        if(field && saved[id] !== undefined) field.value = saved[id];
+      }
+    } catch(error) {
+      console.warn("FORMA could not restore the previous settings:", error);
+    }
+    updateGuidanceOutput();
+    updatePromptMetrics();
+  };
+  if(document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", restore, {once:true});
+  } else {
+    setTimeout(restore, 0);
+  }
+  return "";
+
+loadExamplePrompt() =>
+  let examples = [
+    "A cinematic editorial portrait of a sculptural fashion model in an architectural concrete gallery, directional daylight, precise tailoring, tactile fabric, understated luxury, 35mm film character",
+    "A minimalist still life of translucent glass objects and a single vivid orange, sculptural composition, soft studio shadows, refined art direction, premium print campaign",
+    "A futuristic coastal city at blue hour, reflective monolithic architecture, atmospheric haze, elegant science-fiction production design, cinematic wide composition",
+    "A close-up botanical study of silver-green leaves after rain, delicate water droplets, macro photography, natural color, intricate organic detail",
+    "A high-end streetwear campaign in a brutalist urban setting, dynamic full-body pose, layered silhouettes, hard flash photography, contemporary magazine aesthetic"
+  ];
+  let promptEl = document.getElementById("prompt");
+  if(!promptEl) return;
+  promptEl.value = examples[Math.floor(Math.random() * examples.length)];
+  updatePromptMetrics();
+  saveStudioState();
+
+clearPrompt() =>
+  let promptEl = document.getElementById("prompt");
+  if(promptEl) promptEl.value = "";
+  updatePromptMetrics();
+  saveStudioState();
+
+randomizeSeed() =>
+  let seedEl = document.getElementById("seed");
+  if(seedEl) seedEl.value = String(Math.floor(Math.random() * 900000000) + 100000000);
+  saveStudioState();
+
+copyPrompt() =>
+  let promptEl = document.getElementById("prompt");
+  let text = promptEl ? promptEl.value.trim() : "";
+  if(!text) {
+    studioToast("There is no prompt to copy yet.", "warning");
+    return;
+  }
+  if(navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => studioToast("Prompt copied to clipboard.", "success"),
+      () => studioToast("Clipboard access was blocked by the browser.", "warning")
+    );
+  } else {
+    studioToast("Clipboard access is not available in this browser context.", "warning");
+  }
+
+async enhancePrompt() =>
+  let promptEl = document.getElementById("prompt");
+  let button = document.getElementById("enhanceBtn");
+  let original = promptEl ? promptEl.value.trim() : "";
+  if(!original) {
+    studioToast("Write a prompt before enhancing it.", "warning");
+    return;
+  }
+  if(button) {
+    button.disabled = true;
+    button.textContent = "Refining…";
+  }
+  let styleEl = document.getElementById("style");
+  let styleName = styleEl && styleEl.selectedOptions.length ? styleEl.selectedOptions[0].textContent : "Natural";
+  let enhancedText = "";
+  try {
+    let task = aiText({
+      instruction: "You are an expert visual art director and text-to-image prompt engineer. Rewrite the user's idea into one polished, specific, visually coherent image prompt. Preserve the subject, intent, and important details. Improve composition, camera or rendering language, lighting, materials, environment, color relationships, and visual hierarchy only where relevant. Avoid contradictions, filler, quality-token spam, artist-name imitation, policy evasion, and instructions to render readable text unless the user requested typography. The selected direction is: " + styleName + ". Return only the final prompt, with no heading or explanation.\n\nUser idea:\n" + original,
+      startWith: "",
+      hideStartWith: true,
+      onChunk: (chunk) => {
+        if(!chunk.isFromStartWith) enhancedText += chunk.textChunk;
+      }
+    });
+    await task.onFinishPromise;
+    if(enhancedText.trim()) {
+      promptEl.value = enhancedText.trim();
+      updatePromptMetrics();
+      saveStudioState();
+      studioToast("Prompt refined.", "success");
+    } else {
+      studioToast("The prompt assistant returned no text. Try again.", "warning");
+    }
+  } catch(error) {
+    console.error("FORMA prompt enhancement failed:", error);
+    studioToast("Prompt enhancement failed. Your original text is unchanged.", "error");
+  } finally {
+    if(button) {
+      button.disabled = false;
+      button.textContent = "Enhance prompt";
+    }
+  }
+
+async generateImages() =>
+  let promptEl = document.getElementById("prompt");
+  let negativeEl = document.getElementById("negativePrompt");
+  let styleEl = document.getElementById("style");
+  let resolutionEl = document.getElementById("resolution");
+  let guidanceEl = document.getElementById("guidance");
+  let batchEl = document.getElementById("batch");
+  let seedEl = document.getElementById("seed");
+  let generateButton = document.getElementById("generateBtn");
+  let gallery = document.getElementById("gallery");
+  let status = document.getElementById("batchStatus");
+  let progress = document.getElementById("batchProgress");
+  if(!promptEl || !gallery || !generateButton) return;
+
+  let basePrompt = promptEl.value.trim();
+  if(!basePrompt) {
+    studioToast("Add an image description before generating.", "warning");
+    promptEl.focus();
+    return;
+  }
+
+  let styleName = styleEl ? styleEl.value : "natural";
+  let styleDirections = {
+    natural: "natural visual language, coherent lighting, intentional composition",
+    editorial: "high-end fashion editorial photography, confident art direction, elegant composition, tactile materials, refined color grading",
+    cinematic: "cinematic lighting, atmospheric depth, filmic color science, deliberate camera framing, production-design detail",
+    photoreal: "photorealistic image, physically plausible materials, natural skin and surface detail, accurate perspective, realistic light transport",
+    anime: "polished anime illustration, expressive shape language, intentional linework, nuanced cel shading, rich but controlled colors",
+    illustration: "contemporary editorial illustration, distinctive shapes, layered texture, sophisticated palette, clean visual hierarchy",
+    threeD: "premium 3D render, physically based materials, nuanced reflections, refined studio lighting, carefully composed depth",
+    product: "premium commercial product photography, precise studio lighting, clean material definition, controlled reflections, luxury advertising composition",
+    watercolor: "traditional watercolor painting, transparent pigment layers, subtle paper grain, expressive edges, delicate color transitions"
+  };
+  let finalPrompt = basePrompt;
+  if(styleDirections[styleName]) finalPrompt += ", " + styleDirections[styleName];
+
+  let negativePrompt = negativeEl ? negativeEl.value.trim() : "";
+  let resolution = resolutionEl ? resolutionEl.value : "512x512";
+  let guidance = guidanceEl ? Math.round(Number(guidanceEl.value)) : 7;
+  let count = batchEl ? Math.max(1, Math.min(4, Number(batchEl.value) || 1)) : 1;
+  let seedText = seedEl ? seedEl.value.trim() : "";
+  let seedBase = seedText === "" ? null : Number(seedText);
+  if(seedBase !== null && (!Number.isSafeInteger(seedBase) || seedBase < 0)) {
+    studioToast("Seed must be a non-negative whole number.", "warning");
+    seedEl.focus();
+    return;
+  }
+  if(!Number.isFinite(guidance) || guidance < 1 || guidance > 30) guidance = 7;
+
+  let emptyState = document.getElementById("emptyState");
+  if(emptyState) emptyState.remove();
+  gallery.classList.add("has-results");
+  generateButton.disabled = true;
+  generateButton.textContent = "Generating…";
+  let completed = 0;
+  let failed = 0;
+  let startedAt = Date.now();
+  if(status) status.textContent = "Preparing " + count + (count === 1 ? " image" : " images");
+  if(progress) progress.style.width = "0%";
+
+  for(let index = 0; index < count; index++) {
+    let card = document.createElement("article");
+    card.className = "result-card is-loading";
+    let media = document.createElement("div");
+    media.className = "result-media";
+    let loader = document.createElement("div");
+    loader.className = "result-loading";
+    loader.textContent = "Creating frame " + (index + 1) + " / " + count;
+    media.appendChild(loader);
+    let details = document.createElement("div");
+    details.className = "result-details";
+    let label = document.createElement("span");
+    label.className = "result-index";
+    label.textContent = "FRAME " + String(index + 1).padStart(2, "0");
+    let promptSummary = document.createElement("p");
+    promptSummary.className = "result-prompt";
+    promptSummary.textContent = finalPrompt;
+    details.append(label, promptSummary);
+    card.append(media, details);
+    gallery.prepend(card);
+
+    try {
+      let options = {
+        prompt: finalPrompt,
+        negativePrompt: negativePrompt,
+        resolution: resolution,
+        guidanceScale: guidance
+      };
+      if(seedBase !== null) options.seed = seedBase + index;
+      let result = await image(options);
+      let imageUrl = result && result.dataUrl ? result.dataUrl : String(result || "");
+      if(!imageUrl) throw new Error("The image plugin returned an empty result.");
+
+      let imageElement = document.createElement("img");
+      imageElement.src = imageUrl;
+      imageElement.alt = finalPrompt;
+      imageElement.loading = "lazy";
+      imageElement.decoding = "async";
+      media.replaceChildren(imageElement);
+      card.classList.remove("is-loading");
+
+      let actions = document.createElement("div");
+      actions.className = "result-actions";
+      let download = document.createElement("a");
+      download.className = "result-download";
+      download.href = imageUrl;
+      download.download = "forma-image-" + Date.now() + "-" + (index + 1) + ".png";
+      download.textContent = "Download image";
+      download.setAttribute("aria-label", "Download generated image " + (index + 1));
+      actions.appendChild(download);
+      details.appendChild(actions);
+      completed++;
+    } catch(error) {
+      failed++;
+      card.classList.add("has-error");
+      loader.className = "result-error";
+      loader.textContent = "Generation failed: " + (error && error.message ? error.message : "Unknown error");
+      console.error("FORMA image generation failed:", error);
+    }
+
+    let percent = Math.round(((index + 1) / count) * 100);
+    if(progress) progress.style.width = percent + "%";
+    if(status) status.textContent = "Completed " + (index + 1) + " of " + count;
+  }
+
+  let elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+  let total = gallery.querySelectorAll(".result-card:not(.has-error)").length;
+  let countEl = document.getElementById("resultCount");
+  if(countEl) countEl.textContent = total + (total === 1 ? " image" : " images");
+  if(status) status.textContent = completed + " ready · " + failed + " failed · " + elapsed + "s";
+  generateButton.disabled = false;
+  generateButton.textContent = "Generate images";
+  saveStudioState();
+  if(completed) studioToast(completed + (completed === 1 ? " image generated." : " images generated."), "success");
+  else studioToast("No image was generated. Check the plugin error and try again.", "error");
+
+clearGallery() =>
+  let gallery = document.getElementById("gallery");
+  if(!gallery) return;
+  gallery.replaceChildren();
+  gallery.classList.remove("has-results");
+  let empty = document.createElement("div");
+  empty.id = "emptyState";
+  empty.className = "empty-state";
+  let mark = document.createElement("div");
+  mark.className = "empty-mark";
+  mark.textContent = "✳";
+  let heading = document.createElement("h3");
+  heading.textContent = "Your next idea starts here";
+  let caption = document.createElement("p");
+  caption.textContent = "Write a prompt, tune the direction, and generate your first image.";
+  empty.append(mark, heading, caption);
+  gallery.appendChild(empty);
+  let countEl = document.getElementById("resultCount");
+  if(countEl) countEl.textContent = "0 images";
+  let status = document.getElementById("batchStatus");
+  if(status) status.textContent = "Workspace ready";
+  let progress = document.getElementById("batchProgress");
+  if(progress) progress.style.width = "0%";
+
+resetStudio() =>
+  let defaults = {
+    prompt: "",
+    negativePrompt: "low quality, blurry, distorted anatomy, extra fingers, missing fingers, watermark, text artifacts, compression artifacts",
+    style: "editorial",
+    resolution: "512x512",
+    guidance: "7",
+    batch: "1",
+    seed: ""
+  };
+  for(let id in defaults) {
+    let field = document.getElementById(id);
+    if(field) field.value = defaults[id];
+  }
+  updateGuidanceOutput();
+  updatePromptMetrics();
+  saveStudioState();
+  clearGallery();
+  studioToast("Studio settings reset.", "success");
