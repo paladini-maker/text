@@ -1,0 +1,159 @@
+[restoreStudioState()]
+
+<div id="formaStudio" class="forma-studio">
+  <header class="studio-topbar">
+    <a class="brand-lockup" href="https://perchance.org/" target="_blank" rel="noopener" aria-label="Perchance home">
+      <span class="brand-symbol">F.</span>
+      <span class="brand-wordmark">FORMA<span class="brand-divider">/</span><span class="brand-subtitle">IMAGE STUDIO</span></span>
+    </a>
+    <div class="topbar-right">
+      <span class="engine-label"><span class="engine-dot"></span> PERCHANCE ENGINE</span>
+      <span class="build-label">CREATIVE WORKSPACE · 01</span>
+    </div>
+  </header>
+
+  <main class="studio-main">
+    <section class="studio-hero">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-line"></span> TEXT TO IMAGE / CREATIVE LAB</div>
+        <h1>Make something<br><em>worth looking at.</em></h1>
+        <p>A focused image studio for visual ideas, art direction, and unexpected outcomes.</p>
+      </div>
+      <div class="hero-index" aria-hidden="true">
+        <span class="hero-index-number">01</span>
+        <span class="hero-index-caption">IDEA → IMAGE</span>
+      </div>
+    </section>
+
+    <section class="workspace-grid" aria-label="Image generation controls">
+      <div class="composer-panel panel-card">
+        <div class="panel-heading">
+          <div>
+            <span class="section-kicker">01 / THE BRIEF</span>
+            <h2>Describe your image</h2>
+          </div>
+          <span class="live-tag"><span></span> READY</span>
+        </div>
+
+        <label class="field-label" for="prompt">IMAGE PROMPT</label>
+        <textarea id="prompt" class="prompt-input" maxlength="4000" spellcheck="true" placeholder="Describe the subject, setting, mood, lighting, composition, materials…" oninput="updatePromptMetrics(); saveStudioState();"></textarea>
+        <div class="prompt-footer">
+          <div class="prompt-metrics"><span id="wordCount">0</span> words <span class="metric-divider">/</span> <span id="charCount">0</span> characters</div>
+          <div class="prompt-tools">
+            <button class="text-action" type="button" onclick="loadExamplePrompt()" title="Load a creative prompt">Surprise me <span>↗</span></button>
+            <button class="text-action" type="button" onclick="copyPrompt()">Copy prompt</button>
+            <button class="text-action muted-action" type="button" onclick="clearPrompt()">Clear</button>
+          </div>
+        </div>
+
+        <div class="prompt-assist-row">
+          <div class="assist-copy">
+            <span class="assist-icon">✳</span>
+            <div><strong>Need a sharper brief?</strong><small>Use the AI art director to refine composition, light, and visual detail.</small></div>
+          </div>
+          <button id="enhanceBtn" class="secondary-button" type="button" onclick="enhancePrompt()">Enhance prompt <span>↗</span></button>
+        </div>
+
+        <details class="negative-details">
+          <summary><span>Negative prompt</span><span class="summary-hint">Define what to avoid</span><span class="summary-chevron">＋</span></summary>
+          <textarea id="negativePrompt" class="negative-input" rows="3" oninput="saveStudioState();" placeholder="Elements, defects, or visual qualities to exclude…">low quality, blurry, distorted anatomy, extra fingers, missing fingers, watermark, text artifacts, compression artifacts</textarea>
+        </details>
+
+        <div class="composer-bottomline">
+          <span><span class="tiny-check">✓</span> Prompt stays editable</span>
+          <span>MAX 4,000 CHARACTERS</span>
+        </div>
+      </div>
+
+      <aside class="settings-panel panel-card">
+        <div class="panel-heading settings-heading">
+          <div>
+            <span class="section-kicker">02 / ART DIRECTION</span>
+            <h2>Fine-tune</h2>
+          </div>
+          <span class="settings-glyph">◈</span>
+        </div>
+
+        <div class="control-group">
+          <label class="field-label" for="style">VISUAL LANGUAGE</label>
+          <select id="style" class="studio-select" onchange="saveStudioState();">
+            <option value="editorial" selected>Editorial / Fashion</option>
+            <option value="photoreal">Photorealistic</option>
+            <option value="cinematic">Cinematic</option>
+            <option value="anime">Anime</option>
+            <option value="illustration">Illustration</option>
+            <option value="threeD">3D Render</option>
+            <option value="product">Product Photography</option>
+            <option value="watercolor">Watercolor</option>
+            <option value="natural">Natural / Minimal</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label class="field-label" for="resolution">CANVAS RATIO</label>
+          <select id="resolution" class="studio-select" onchange="saveStudioState();">
+            <option value="512x512" selected>Square · 1:1</option>
+            <option value="512x768">Portrait · 2:3</option>
+            <option value="768x512">Landscape · 3:2</option>
+          </select>
+          <div class="ratio-preview-row" aria-hidden="true"><span class="ratio-preview square"></span><span class="ratio-preview portrait"></span><span class="ratio-preview landscape"></span><span class="ratio-caption">512 × 512 / 512 × 768 / 768 × 512</span></div>
+        </div>
+
+        <div class="control-group guidance-group">
+          <div class="range-heading"><label class="field-label" for="guidance">PROMPT GUIDANCE</label><output id="guidanceValue" for="guidance">7</output></div>
+          <input id="guidance" class="studio-range" type="range" min="1" max="30" step="1" value="7" oninput="updateGuidanceOutput(this.value); saveStudioState();">
+          <div class="range-ends"><span>More creative</span><span>More literal</span></div>
+        </div>
+
+        <div class="settings-split">
+          <div class="control-group">
+            <label class="field-label" for="batch">VARIATIONS</label>
+            <select id="batch" class="studio-select" onchange="saveStudioState();">
+              <option value="1" selected>1 image</option>
+              <option value="2">2 images</option>
+              <option value="3">3 images</option>
+              <option value="4">4 images</option>
+            </select>
+          </div>
+          <div class="control-group">
+            <label class="field-label" for="seed">SEED</label>
+            <div class="seed-control"><input id="seed" class="seed-input" type="number" min="0" step="1" placeholder="Random" onchange="saveStudioState();"><button type="button" class="seed-button" onclick="randomizeSeed()" title="Create a random seed">↻</button></div>
+          </div>
+        </div>
+
+        <div class="settings-note"><span>i</span><p>Images are generated sequentially to keep requests orderly. Leaving seed empty uses a random seed.</p></div>
+
+        <button id="generateBtn" class="generate-button" type="button" onclick="generateImages()"><span class="generate-mark">✳</span><span>Generate images</span><span class="generate-arrow">↗</span></button>
+        <button class="reset-button" type="button" onclick="resetStudio()">Reset controls</button>
+      </aside>
+    </section>
+
+    <section class="results-section" aria-live="polite">
+      <div class="results-heading">
+        <div>
+          <span class="section-kicker">03 / OUTPUT</span>
+          <h2>Your canvas <span id="resultCount" class="result-count">0 images</span></h2>
+        </div>
+        <div class="results-status-wrap">
+          <span id="batchStatus" class="batch-status">Workspace ready</span>
+          <button class="clear-gallery-button" type="button" onclick="clearGallery()">Clear gallery <span>×</span></button>
+        </div>
+      </div>
+      <div class="progress-track"><div id="batchProgress" class="progress-fill"></div></div>
+      <div id="gallery" class="results-grid">
+        <div id="emptyState" class="empty-state">
+          <div class="empty-mark">✳</div>
+          <h3>Your next idea starts here</h3>
+          <p>Write a prompt, tune the direction, and generate your first image.</p>
+          <span class="empty-coordinate">F / 001</span>
+        </div>
+      </div>
+    </section>
+
+    <footer class="studio-footer">
+      <span>FORMA <span class="footer-divider">/</span> A CREATIVE IMAGE WORKSPACE</span>
+      <span>POWERED BY PERCHANCE TEXT-TO-IMAGE</span>
+    </footer>
+  </main>
+  <div id="studioToast" class="studio-toast" role="status" aria-live="polite"></div>
+</div>

@@ -51,7 +51,7 @@
             <span class="assist-icon">✳</span>
             <div><strong>Need a sharper brief?</strong><small>Use the AI art director to refine composition, light, and visual detail.</small></div>
           </div>
-          <button id="enhanceBtn" class="secondary-button" type="button" onclick="enhancePrompt()">Enhance prompt <span>↗</span></button>
+          <button id="enhanceBtn" class="secondary-button" type="button" onclick="enhancePrompt()"><span class="enhance-label">Enhance prompt</span><span>↗</span></button>
         </div>
 
         <details class="negative-details">
@@ -117,14 +117,15 @@
           </div>
           <div class="control-group">
             <label class="field-label" for="seed">SEED</label>
-            <div class="seed-control"><input id="seed" class="seed-input" type="number" min="0" step="1" placeholder="Random" onchange="saveStudioState();"><button type="button" class="seed-button" onclick="randomizeSeed()" title="Create a random seed">↻</button></div>
+            <div class="seed-control"><input id="seed" class="seed-input" type="number" min="1" step="1" placeholder="Random" aria-label="Generation seed; leave empty for random" onchange="saveStudioState();"><button type="button" class="seed-button" onclick="randomizeSeed()" title="Create a random seed">↻</button></div>
           </div>
         </div>
 
         <div class="settings-note"><span>i</span><p>Images are generated sequentially to keep requests orderly. Leaving seed empty uses a random seed.</p></div>
 
-        <button id="generateBtn" class="generate-button" type="button" onclick="generateImages()"><span class="generate-mark">✳</span><span>Generate images</span><span class="generate-arrow">↗</span></button>
-        <button class="reset-button" type="button" onclick="resetStudio()">Reset controls</button>
+        <button id="generateBtn" class="generate-button" type="button" onclick="generateImages()"><span class="generate-mark">✳</span><span class="generate-label">Generate images</span><span class="generate-arrow">↗</span></button>
+        <button id="cancelBtn" class="cancel-button" type="button" onclick="cancelGeneration()" hidden>Stop after current image</button>
+        <button id="resetBtn" class="reset-button" type="button" onclick="resetStudio()">Reset controls</button>
       </aside>
     </section>
 
@@ -136,11 +137,11 @@
         </div>
         <div class="results-status-wrap">
           <span id="batchStatus" class="batch-status">Workspace ready</span>
-          <button class="clear-gallery-button" type="button" onclick="clearGallery()">Clear gallery <span>×</span></button>
+          <button id="clearGalleryBtn" class="clear-gallery-button" type="button" onclick="clearGallery()">Clear gallery <span>×</span></button>
         </div>
       </div>
       <div class="progress-track"><div id="batchProgress" class="progress-fill"></div></div>
-      <div id="gallery" class="results-grid">
+      <div id="gallery" class="results-grid" aria-busy="false">
         <div id="emptyState" class="empty-state">
           <div class="empty-mark">✳</div>
           <h3>Your next idea starts here</h3>

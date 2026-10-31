@@ -1,5 +1,5 @@
 /* FORMA — editorial studio system. Paste into the Perchance CSS panel. */
-:root {
+.forma-studio {
   color-scheme: light;
   --forma-paper: #f2f1ec;
   --forma-card: #fbfaf7;
@@ -12,17 +12,6 @@
   --forma-shadow: 0 18px 55px rgba(27, 29, 20, .055);
 }
 
-html, body {
-  min-height: 100%;
-  margin: 0 !important;
-  padding: 0 !important;
-  background: var(--forma-paper) !important;
-  color: var(--forma-ink) !important;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
-  text-align: left !important;
-}
-
-body > * { box-sizing: border-box; }
 #formaStudio, #formaStudio * { box-sizing: border-box; }
 #formaStudio button, #formaStudio input, #formaStudio textarea, #formaStudio select { font: inherit; }
 #formaStudio button { cursor: pointer; }
@@ -34,6 +23,10 @@ body > * { box-sizing: border-box; }
   margin: 0 auto;
   padding: 0 36px 28px;
   color: var(--forma-ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: left;
+  background: var(--forma-paper);
+  min-height: 100vh;
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -159,6 +152,35 @@ body > * { box-sizing: border-box; }
 .generate-button:hover { transform: translateY(-2px); background: #30342a; }
 .generate-mark { display: grid; place-items: center; width: 25px; height: 25px; border-radius: 8px; background: var(--forma-acid); color: var(--forma-ink); font-size: 16px; }
 .generate-arrow { color: var(--forma-acid); font-size: 18px; }
+
+.cancel-button {
+  display: block;
+  width: 100%;
+  min-height: 39px;
+  margin-top: 9px;
+  padding: 8px 12px;
+  border: 1px solid #e3c9c2;
+  border-radius: 10px;
+  background: #fff8f6;
+  color: #8e4439;
+  font-size: 10px;
+  font-weight: 800;
+  transition: background .15s ease, border-color .15s ease;
+}
+.cancel-button:hover:not(:disabled) { background: #fbe9e5; border-color: #d7a79d; }
+#formaStudio .cancel-button[hidden] { display: none !important; }
+#formaStudio button:focus-visible,
+#formaStudio a:focus-visible,
+#formaStudio input:focus-visible,
+#formaStudio textarea:focus-visible,
+#formaStudio select:focus-visible {
+  outline: 2px solid #8eae43;
+  outline-offset: 3px;
+}
+#formaStudio .generate-button:disabled { transform: none; }
+#formaStudio .result-card.has-error { border-color: #d8b8b1; }
+#formaStudio [aria-busy="true"] { cursor: progress; }
+
 .reset-button { display: block; margin: 12px auto 0; padding: 4px 9px; border: 0; background: transparent; color: #93948b; font-size: 9px; font-weight: 700; }
 .reset-button:hover { color: var(--forma-ink); }
 
@@ -236,6 +258,7 @@ body > * { box-sizing: border-box; }
   .prompt-footer { align-items: flex-start; flex-direction: column; }
   .results-grid { grid-template-columns: 1fr; }
   .result-media { aspect-ratio: 1 / 1; }
+  .cancel-button { min-height: 42px; }
   .settings-split { gap: 9px; }
   .ratio-caption { font-size: 7px; }
 }
